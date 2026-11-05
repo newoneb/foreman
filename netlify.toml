@@ -1,0 +1,36 @@
+# Netlify settings for the Foreman site. No build step: the files deploy as they are.
+[build]
+  publish = "."
+
+# Old Framer pages, so existing links and bookmarks still land somewhere useful.
+# (/join keeps working on its own: Netlify serves join.html at /join.)
+[[redirects]]
+  from = "/for-business-owners"
+  to = "/advisory.html"
+  status = 301
+
+[[redirects]]
+  from = "/team"
+  to = "/firm.html"
+  status = 301
+
+[[redirects]]
+  from = "/research"
+  to = "/insights.html"
+  status = 301
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=(), payment=()"
+    # If you add analytics or embeds later, allow their domains here or they will be blocked.
+    Content-Security-Policy = "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; font-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'"
+
+[[headers]]
+  for = "/assets/fonts/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+    Access-Control-Allow-Origin = "*"
