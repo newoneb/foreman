@@ -7,5 +7,5 @@
 // from Supabase > Project Settings > API Keys. Both are meant to be public: every permission
 // is enforced by the row-level security in supabase/schema.sql. Never put the service_role
 // or secret key here.
-export const SUPABASE_URL = "";
-export const SUPABASE_ANON_KEY = "";
+export const SUPABASE_URL = "https://wiyqcvsbqjqeuqikvaqq.supabase.co";
+export const SUPABASE_ANON_KEY = "sb_publishable_4XDXxPB5zZdB56MAblo8-A_33cdmde1";
