@@ -1,0 +1,53 @@
+# Netlify settings for the Foreman site. There is no build step: the files deploy as they are.
+[build]
+  publish = "."
+
+# Addresses from the old Framer site, so existing links and bookmarks still land somewhere useful.
+[[redirects]]
+  from = "/for-business-owners"
+  to = "/owners.html"
+  status = 301
+
+[[redirects]]
+  from = "/team"
+  to = "/about.html"
+  status = 301
+
+[[redirects]]
+  from = "/research"
+  to = "/services.html"
+  status = 301
+
+[[redirects]]
+  from = "/join"
+  to = "/students.html"
+  status = 301
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=(), payment=()"
+    # The portal talks to Supabase. If you add analytics, embeds or a custom Supabase domain,
+    # allow those addresses here as well, or the browser will block them.
+    Content-Security-Policy = "default-src 'self'; img-src 'self' data: blob: https://*.supabase.co; style-src 'self'; script-src 'self'; font-src 'self'; connect-src 'self' https://*.supabase.co wss://*.supabase.co; form-action 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'"
+
+[[headers]]
+  for = "/portal/*"
+  [headers.values]
+    X-Robots-Tag = "noindex"
+    Cache-Control = "no-cache"
+
+# Your Supabase settings; always fetch the latest copy.
+[[headers]]
+  for = "/config.js"
+  [headers.values]
+    Cache-Control = "no-cache"
+
+[[headers]]
+  for = "/assets/fonts/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+    Access-Control-Allow-Origin = "*"
