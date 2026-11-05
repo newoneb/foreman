@@ -11,7 +11,8 @@ This is the interactive edition of the design. The wording, the forms and the po
 | `index.html` | Home |
 | `services.html` | Succession advisory and operations improvement |
 | `owners.html` | How engagements work, the client portal, questions, and the consultation request form |
-| `students.html` | Membership and the application process |
+| `students.html` | Recruiting: the live application status, the recruiting calendar, info sessions, coffee chats, the application process and the notify form |
+| `team.html` | The team page, drawn from the cards in the portal |
 | `about.html`, `contact.html`, `disclosures.html` | About, contact form, legal and privacy |
 | `thanks.html`, `404.html` | Shown after a form without JavaScript, and for missing pages |
 | `portal/` | The portal: sign-in, applications, client engagements, the member library, administration |
@@ -56,7 +57,7 @@ Supabase pauses free projects after a week without any activity. Opening the por
 
 ## 3. How the portal works
 
-**Applicants** create an account, write the application (three short answers and a resume), save drafts and submit. They can follow their status: under review, first interview, case interview, decision. Administrators review, score, leave notes for the applicant, and decide. Accepting an application gives the student member access automatically. Applications can be closed with the switch on the Applications page.
+**Applicants** create an account, write the application (three short answers and a resume), save drafts and submit. They can follow their status: under review, first interview, case interview, decision. Administrators review, score, leave notes for the applicant, and decide. Accepting an application gives the student member access automatically. Applications are accepted only while a recruiting cycle is open (see section 4).
 
 **Clients** never sign up blindly. Start an engagement from an inquiry (or with **New engagement**) and the portal creates an invitation link for the client. Send it to them by email. When they create an account from that link, their engagement opens: they upload the records you request, read your weekly updates and download deliverables. Each request is marked received when a file arrives.
 
@@ -66,7 +67,33 @@ Supabase pauses free projects after a week without any activity. Opening the por
 
 All of these rules are enforced by the database itself (row-level security in `supabase/schema.sql`), not just by the pages. Files sit in private storage and open only through links that expire after an hour.
 
-## 4. Move foreman-capital.com from Framer
+## 4. Recruiting and the team page
+
+Everything here is managed in the portal and appears on the website straight away.
+
+**Recruiting cycles** (Portal → Recruiting → Cycles, administrators). Admissions are not rolling: schedule each cycle with a name, such as *Winter 2027*, and the dates and times applications open and close (Chicago time), plus an optional "decisions by" date.
+- Students can start a draft once a cycle is scheduled, and can submit only while it is open. The database enforces this, so the deadline holds even if someone keeps the page open.
+- Each submission is filed under its cycle. The Applications page shows one cycle at a time, and **Download CSV** exports the list you're looking at.
+- An application you return to the student for edits can be sent back after the deadline.
+- Cycles can't overlap. Until the first cycle is scheduled, applications are closed.
+- The Students page shows where things stand: "Winter 2027 applications are open" with a countdown to the deadline, or a countdown to the opening date, and a recruiting calendar of the key dates. While a cycle is open, a small card on the other pages of the site points visitors to it. It appears once per visit and stays away once closed.
+
+**Info sessions** (Portal → Recruiting → Info sessions). Add a title, date, times, place, an optional meeting link and an optional number of seats.
+- Visitors register on the Students page and get **Add to Google Calendar** and an .ics file for Apple Calendar and Outlook.
+- The meeting link is shown only to people who register. A full session says so.
+- Open **Sign-ups** to see who is coming, copy their emails or download a CSV.
+
+**Notify list** (Portal → Recruiting → Notify list). While applications are closed, the Students page asks visitors for their email. When a cycle opens, copy the addresses into the BCC line of one email, then clear the list.
+
+**The team page** (Portal → Team page, administrators). Add each person with a title, teams (Leadership, Engagement managers, Analysts, Marketing, or your own), class year, major, a short bio, LinkedIn and a photo (JPEG, PNG or WebP, up to 5 MB, ideally 4:5). **Order on the page** sets who comes first. Photos sit in a public storage bucket, since the team page is public.
+- **Link a card to the person's portal account**, and they get a **Your team profile** page where they can update their own photo, bio and coffee chat details. Name, title, teams and order stay with administrators.
+- **Helps run recruiting** lets a member with a linked card manage info sessions, see sign-ups and use the notify list. Cycles and decisions stay with administrators.
+
+**Coffee chats.** Anyone whose card says **Takes coffee chats** is listed on the Students page. Each person adds a booking link. Calendly, Cal.com and Google Calendar's appointment schedules all have free plans and handle confirmations, reminders and rescheduling. Anyone without a link gets an **Email to schedule** button instead. The Marketing team is the natural home for this, but anyone can host.
+
+**For posters,** `foreman-capital.com/apply` goes to the Students page. A QR code pointing there always shows the current status.
+
+## 5. Move foreman-capital.com from Framer
 
 1. In Netlify, open **Domain management → Add a domain** and enter `foreman-capital.com`.
 2. Netlify shows the DNS records to set. Change them wherever the domain's DNS is managed, replacing the records that point to Framer.
@@ -74,13 +101,14 @@ All of these rules are enforced by the database itself (row-level security in `s
 
 The old Framer addresses `/for-business-owners`, `/team`, `/research` and `/join` redirect to the new pages.
 
-## 5. Updating the site later
+## 6. Updating the site later
 
-- **Switching from the earlier edition:** upload every file in this folder except `config.js`. The portal, the forms and `supabase/schema.sql` are unchanged, so nothing needs to be run in Supabase.
+- **Updating from the November 4 version:** upload every file in this folder except `config.js`, then run the whole of `supabase/schema.sql` again in the Supabase SQL Editor. It adds recruiting cycles, info sessions, the notify list, the team page and the team photo bucket, and keeps all your data. Then schedule your first cycle under Portal → Recruiting, because applications stay closed until one is open.
 - Update packages leave out `config.js`, so your Supabase settings are never overwritten. Upload the changed files on GitHub and keep your existing `config.js`.
 - If a new version changes `supabase/schema.sql`, run the whole file again in the SQL Editor. It updates the rules and keeps your data.
 - Page text lives in the HTML files. The header and footer are repeated on every page, so change them everywhere.
 - Colors, fonts and spacing are defined at the top of `assets/css/site.css`. The portal's styles are in `assets/css/portal.css`.
+- Recruiting and the team page are drawn by `assets/js/recruiting.js`, which reads one public call (`recruiting_public` in the schema). Visitors can read dates, sessions and the team, register for a session and join the notify list, and nothing else.
 - The interactive pieces live in `assets/js/site.js`: the exploded mark and the dot field on the home page, the situation drawings, the engagement steps that hold the screen while you scroll, the fit check, the earnings exhibit on Services, the portal preview on the owners page and the organization drawing on About. Each one leaves a complete, readable page when JavaScript is off or a visitor has asked their device for reduced motion.
 - The six labels beside the mark on the home page are the `axo-labels` list in `index.html`, listed from the top layer down. Each `data-i` ties a label to its layer of the mark, so edit the wording but keep those numbers.
 - The earnings exhibit takes each adjustment from its row in `services.html` (`data-amount`). The financing assumptions (10% equity, a 10-year loan at 10.5%, capital expenditure and taxes) are set at the top of `setUpExhibit` in `assets/js/site.js`; the note under the exhibit states them, so change both together.

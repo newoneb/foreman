@@ -8,8 +8,12 @@
 --   Clients                  the engagements they were invited to: requests, files,
 --                            updates, deliverables and the team
 --   Members                  the engagements they are on, the library and announcements
---   Administrators           everything, including applications, reviews and inquiries
---   Website visitors         can send an inquiry, and nothing else
+--   Recruiting team          members marked "runs recruiting" on the team page: info sessions,
+--                            their sign-ups and the notify list
+--   Administrators           everything, including applications, reviews, inquiries, cycles
+--                            and the team page
+--   Website visitors         can send an inquiry, register for an info session, ask to be told
+--                            when applications open, and read the team, dates and sessions
 --
 -- After you first sign in to the portal, make yourself an administrator here:
 --   update public.profiles set role = 'admin' where email = 'you@example.com';
@@ -147,12 +151,85 @@ create table if not exists public.announcements (
   created_at timestamptz not null default now()
 );
 
+-- Recruiting. Applications are accepted only while a cycle is open.
+create table if not exists public.cycles (
+  id uuid primary key default gen_random_uuid(),
+  name text not null check (char_length(name) between 1 and 80),
+  opens_at timestamptz not null,
+  closes_at timestamptz not null,
+  decisions_by date,
+  note text not null default '' check (char_length(note) <= 2000),
+  created_at timestamptz not null default now(),
+  check (closes_at > opens_at)
+);
+
+alter table public.applications add column if not exists cycle_id uuid references public.cycles (id) on delete set null;
+
+-- The public team page. A card can be linked to a portal account, so its owner can edit it.
+create table if not exists public.team_members (
+  id uuid primary key default gen_random_uuid(),
+  name text not null check (char_length(name) between 1 and 120),
+  title text not null default '' check (char_length(title) <= 120),
+  teams text[] not null default '{}' check (cardinality(teams) <= 8 and char_length(array_to_string(teams, '|')) <= 400),
+  bio text not null default '' check (char_length(bio) <= 1500),
+  class_year text not null default '' check (char_length(class_year) <= 40),
+  major text not null default '' check (char_length(major) <= 120),
+  photo_path text check (photo_path is null or photo_path like (id::text || '/%')),
+  linkedin_url text check (linkedin_url is null or (linkedin_url ~* '^https://' and char_length(linkedin_url) <= 300)),
+  email text not null default '' check (char_length(email) <= 320),
+  booking_url text check (booking_url is null or (booking_url ~* '^https://' and char_length(booking_url) <= 500)),
+  chat_topics text not null default '' check (char_length(chat_topics) <= 200),
+  hosts_chats boolean not null default false,
+  runs_recruiting boolean not null default false,
+  profile_id uuid unique references public.profiles (id) on delete set null,
+  visible boolean not null default true,
+  sort_order int not null default 100 check (sort_order between 0 and 10000),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.info_sessions (
+  id uuid primary key default gen_random_uuid(),
+  title text not null default 'Information session' check (char_length(title) between 1 and 160),
+  starts_at timestamptz not null,
+  ends_at timestamptz not null,
+  location text not null default '' check (char_length(location) <= 200),
+  meeting_url text check (meeting_url is null or (meeting_url ~* '^https://' and char_length(meeting_url) <= 500)),
+  capacity int check (capacity is null or capacity between 1 and 5000),
+  details text not null default '' check (char_length(details) <= 2000),
+  cycle_id uuid references public.cycles (id) on delete set null,
+  created_at timestamptz not null default now(),
+  check (ends_at > starts_at)
+);
+
+create table if not exists public.session_registrations (
+  id uuid primary key default gen_random_uuid(),
+  session_id uuid not null references public.info_sessions (id) on delete cascade,
+  name text not null check (char_length(name) between 1 and 200),
+  email text not null check (char_length(email) between 3 and 320),
+  year text not null default '' check (char_length(year) <= 40),
+  created_at timestamptz not null default now(),
+  unique (session_id, email)
+);
+
+-- Students who asked to hear when the next cycle opens.
+create table if not exists public.notify_list (
+  id uuid primary key default gen_random_uuid(),
+  email text not null unique check (char_length(email) between 3 and 320),
+  name text not null default '' check (char_length(name) <= 200),
+  created_at timestamptz not null default now()
+);
+
 create index if not exists engagement_people_user_idx on public.engagement_people (user_id);
 create index if not exists engagement_people_engagement_idx on public.engagement_people (engagement_id);
 create index if not exists documents_engagement_idx on public.documents (engagement_id);
 create index if not exists updates_engagement_idx on public.updates (engagement_id);
 create index if not exists application_reviews_application_idx on public.application_reviews (application_id);
 create index if not exists inquiries_created_idx on public.inquiries (created_at desc);
+create index if not exists applications_cycle_idx on public.applications (cycle_id);
+create index if not exists cycles_dates_idx on public.cycles (opens_at, closes_at);
+create index if not exists info_sessions_start_idx on public.info_sessions (starts_at);
+create index if not exists session_registrations_session_idx on public.session_registrations (session_id);
 
 insert into public.settings (key, value) values ('applications_open', 'true')
 on conflict (key) do nothing;
@@ -199,9 +276,36 @@ language sql stable security definer set search_path = public as $$
   );
 $$;
 
+-- The cycle accepting applications at this moment, if there is one.
+create or replace function public.open_cycle_id() returns uuid
+language sql stable security definer set search_path = public as $$
+  select id from public.cycles where opens_at <= now() and closes_at > now() order by closes_at limit 1;
+$$;
+
 create or replace function public.applications_open() returns boolean
 language sql stable security definer set search_path = public as $$
-  select coalesce((select value <> 'false' from public.settings where key = 'applications_open'), true);
+  select public.open_cycle_id() is not null;
+$$;
+
+-- Students can start a draft once a cycle is scheduled, and submit it while the cycle is open.
+create or replace function public.cycle_ahead() returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.cycles where closes_at > now());
+$$;
+
+-- Administrators, and members whose team card says they run recruiting.
+create or replace function public.is_recruiter() returns boolean
+language sql stable security definer set search_path = public as $$
+  select public.is_admin() or (
+    public.is_member()
+    and exists (select 1 from public.team_members where profile_id = auth.uid() and runs_recruiting)
+  );
+$$;
+
+-- Team photos live in a folder named after the card's id.
+create or replace function public.owns_team_folder(folder text) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.team_members where id::text = folder and profile_id = auth.uid());
 $$;
 
 
@@ -259,14 +363,23 @@ begin
     new.message := '';
     new.submitted_at := null;
     new.decided_at := null;
+    new.cycle_id := null;
   else
     new.user_id := old.user_id;
     new.email := old.email;
     new.message := old.message;
     new.decided_at := old.decided_at;
     new.submitted_at := old.submitted_at;
+    new.cycle_id := old.cycle_id;
     if new.status is distinct from old.status then
       if old.status = 'draft' and new.status = 'submitted' then
+        -- A first submission joins the open cycle. One returned for edits keeps its cycle.
+        if old.cycle_id is null then
+          new.cycle_id := public.open_cycle_id();
+          if new.cycle_id is null then
+            raise exception 'Applications are closed right now. You can submit once the next cycle opens.';
+          end if;
+        end if;
         new.submitted_at := now();
       else
         raise exception 'Only Foreman can change the status of an application.';
@@ -297,6 +410,54 @@ drop trigger if exists application_accepted on public.applications;
 create trigger application_accepted
   after update of status on public.applications
   for each row execute function public.grant_membership();
+
+-- Cycles never overlap, so there is never doubt about which one an application belongs to.
+create or replace function public.guard_cycle() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  clash text;
+begin
+  select name into clash from public.cycles
+  where id is distinct from new.id and tstzrange(opens_at, closes_at) && tstzrange(new.opens_at, new.closes_at)
+  limit 1;
+  if clash is not null then
+    raise exception 'These dates overlap the % cycle. Cycles can''t overlap.', clash;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists guard_cycle on public.cycles;
+create trigger guard_cycle
+  before insert or update on public.cycles
+  for each row execute function public.guard_cycle();
+
+-- People editing their own team card can change how they present themselves,
+-- not their name, title, teams or place on the page.
+create or replace function public.guard_team_member() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  new.updated_at := now();
+  if auth.uid() is null or public.is_admin() then
+    return new;
+  end if;
+  new.id := old.id;
+  new.name := old.name;
+  new.title := old.title;
+  new.teams := old.teams;
+  new.runs_recruiting := old.runs_recruiting;
+  new.profile_id := old.profile_id;
+  new.visible := old.visible;
+  new.sort_order := old.sort_order;
+  new.created_at := old.created_at;
+  return new;
+end;
+$$;
+
+drop trigger if exists guard_team_member on public.team_members;
+create trigger guard_team_member
+  before update on public.team_members
+  for each row execute function public.guard_team_member();
 
 -- Names on reviews, updates, files and announcements come from the author's profile.
 create or replace function public.stamp_author() returns trigger
@@ -387,6 +548,97 @@ begin
 end;
 $$;
 
+-- Everything the public recruiting pages show, in one call: the open, next and last
+-- cycles, upcoming info sessions (without their meeting links) and the team.
+-- Contact details appear only for people who host coffee chats.
+create or replace function public.recruiting_public() returns jsonb
+language sql stable security definer set search_path = public as $$
+  select jsonb_build_object(
+    'now', now(),
+    'cycle', (select to_jsonb(c) - 'note' - 'created_at' from public.cycles c
+              where c.opens_at <= now() and c.closes_at > now() order by c.closes_at limit 1),
+    'next', (select to_jsonb(c) - 'note' - 'created_at' from public.cycles c
+             where c.opens_at > now() order by c.opens_at limit 1),
+    'last', (select to_jsonb(c) - 'note' - 'created_at' from public.cycles c
+             where c.closes_at <= now() order by c.closes_at desc limit 1),
+    'sessions', coalesce((
+      select jsonb_agg(to_jsonb(s) order by s.starts_at) from (
+        select i.id, i.title, i.starts_at, i.ends_at, i.location, i.details, i.capacity,
+               (i.meeting_url is not null) as online,
+               (select count(*) from public.session_registrations r where r.session_id = i.id) as registered
+        from public.info_sessions i
+        where i.ends_at > now()
+        order by i.starts_at
+        limit 20
+      ) s), '[]'::jsonb),
+    'team', coalesce((
+      select jsonb_agg(to_jsonb(t) order by t.sort_order, t.name) from (
+        select m.id, m.name, m.title, m.teams, m.bio, m.class_year, m.major, m.photo_path, m.linkedin_url,
+               m.hosts_chats, m.sort_order,
+               case when m.hosts_chats then m.booking_url end as booking_url,
+               case when m.hosts_chats then nullif(m.email, '') end as email,
+               case when m.hosts_chats then m.chat_topics else '' end as chat_topics
+        from public.team_members m
+        where m.visible
+      ) t), '[]'::jsonb)
+  );
+$$;
+
+-- A visitor registers for an info session. Registering twice is harmless, and the
+-- meeting link comes back only to people who have registered.
+create or replace function public.register_for_session(p_session uuid, p_name text, p_email text, p_year text default '')
+returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  s public.info_sessions;
+  clean_email text := lower(trim(coalesce(p_email, '')));
+  clean_name text := left(trim(coalesce(p_name, '')), 200);
+  taken int;
+  fresh boolean := false;
+begin
+  if clean_name = '' then
+    raise exception 'Please add your name.';
+  end if;
+  if char_length(clean_email) > 320 or clean_email !~ '^[^@[:space:]]+@[^@[:space:]]+[.][^@[:space:]]+$' then
+    raise exception 'Please check your email address.';
+  end if;
+  select * into s from public.info_sessions where id = p_session for update;
+  if not found then
+    raise exception 'This session is no longer on the calendar.';
+  end if;
+  if s.ends_at <= now() then
+    raise exception 'This session has already taken place.';
+  end if;
+  if not exists (select 1 from public.session_registrations where session_id = s.id and email = clean_email) then
+    select count(*) into taken from public.session_registrations where session_id = s.id;
+    if s.capacity is not null and taken >= s.capacity then
+      raise exception 'This session is full. Please choose another one.';
+    end if;
+    insert into public.session_registrations (session_id, name, email, year)
+    values (s.id, clean_name, clean_email, left(trim(coalesce(p_year, '')), 40));
+    fresh := true;
+  end if;
+  return jsonb_build_object(
+    'id', s.id, 'title', s.title, 'starts_at', s.starts_at, 'ends_at', s.ends_at, 'location', s.location,
+    'details', s.details, 'meeting_url', s.meeting_url, 'already', not fresh);
+end;
+$$;
+
+-- A visitor asks to hear when applications open.
+create or replace function public.join_notify_list(p_email text, p_name text default '') returns void
+language plpgsql security definer set search_path = public as $$
+declare
+  clean_email text := lower(trim(coalesce(p_email, '')));
+begin
+  if char_length(clean_email) > 320 or clean_email !~ '^[^@[:space:]]+@[^@[:space:]]+[.][^@[:space:]]+$' then
+    raise exception 'Please check your email address.';
+  end if;
+  insert into public.notify_list (email, name)
+  values (clean_email, left(trim(coalesce(p_name, '')), 200))
+  on conflict (email) do update set name = coalesce(nullif(excluded.name, ''), public.notify_list.name);
+end;
+$$;
+
 -- Administrators set each person's access. No one can remove their own.
 create or replace function public.set_role(target uuid, new_role text) returns void
 language plpgsql security definer set search_path = public as $$
@@ -418,6 +670,11 @@ alter table public.documents enable row level security;
 alter table public.updates enable row level security;
 alter table public.resources enable row level security;
 alter table public.announcements enable row level security;
+alter table public.cycles enable row level security;
+alter table public.team_members enable row level security;
+alter table public.info_sessions enable row level security;
+alter table public.session_registrations enable row level security;
+alter table public.notify_list enable row level security;
 
 -- profiles
 drop policy if exists "profiles: read own, admins read all" on public.profiles;
@@ -441,7 +698,7 @@ create policy "applications: read own, admins read all" on public.applications
   for select to authenticated using (user_id = (select auth.uid()) or public.is_admin());
 drop policy if exists "applications: start own while open" on public.applications;
 create policy "applications: start own while open" on public.applications
-  for insert to authenticated with check (user_id = (select auth.uid()) and public.applications_open());
+  for insert to authenticated with check (user_id = (select auth.uid()) and public.cycle_ahead());
 drop policy if exists "applications: edit own draft" on public.applications;
 create policy "applications: edit own draft" on public.applications
   for update to authenticated
@@ -542,12 +799,53 @@ create policy "announcements: admins manage" on public.announcements
   for all to authenticated using (public.is_admin()) with check (public.is_admin());
 
 
+-- recruiting: visitors read through recruiting_public() and sign up through its two companions
+drop policy if exists "cycles: recruiters read" on public.cycles;
+create policy "cycles: recruiters read" on public.cycles
+  for select to authenticated using (public.is_recruiter());
+drop policy if exists "cycles: admins manage" on public.cycles;
+create policy "cycles: admins manage" on public.cycles
+  for all to authenticated using (public.is_admin()) with check (public.is_admin());
+
+drop policy if exists "team: recruiters and the person read" on public.team_members;
+create policy "team: recruiters and the person read" on public.team_members
+  for select to authenticated using (public.is_recruiter() or profile_id = (select auth.uid()));
+drop policy if exists "team: admins add" on public.team_members;
+create policy "team: admins add" on public.team_members
+  for insert to authenticated with check (public.is_admin());
+drop policy if exists "team: admins or the person update" on public.team_members;
+create policy "team: admins or the person update" on public.team_members
+  for update to authenticated
+  using (public.is_admin() or profile_id = (select auth.uid()))
+  with check (public.is_admin() or profile_id = (select auth.uid()));
+drop policy if exists "team: admins remove" on public.team_members;
+create policy "team: admins remove" on public.team_members
+  for delete to authenticated using (public.is_admin());
+
+drop policy if exists "sessions: recruiters manage" on public.info_sessions;
+create policy "sessions: recruiters manage" on public.info_sessions
+  for all to authenticated using (public.is_recruiter()) with check (public.is_recruiter());
+drop policy if exists "registrations: recruiters read" on public.session_registrations;
+create policy "registrations: recruiters read" on public.session_registrations
+  for select to authenticated using (public.is_recruiter());
+drop policy if exists "registrations: recruiters remove" on public.session_registrations;
+create policy "registrations: recruiters remove" on public.session_registrations
+  for delete to authenticated using (public.is_recruiter());
+drop policy if exists "notify: recruiters read" on public.notify_list;
+create policy "notify: recruiters read" on public.notify_list
+  for select to authenticated using (public.is_recruiter());
+drop policy if exists "notify: recruiters remove" on public.notify_list;
+create policy "notify: recruiters remove" on public.notify_list
+  for delete to authenticated using (public.is_recruiter());
+
+
 -- ============================================================== table privileges
 -- Row-level security decides which rows; these grants decide which operations.
 
 revoke all on public.profiles, public.settings, public.applications, public.application_reviews,
   public.engagements, public.inquiries, public.engagement_people, public.documents, public.updates,
-  public.resources, public.announcements from anon;
+  public.resources, public.announcements, public.cycles, public.team_members, public.info_sessions,
+  public.session_registrations, public.notify_list from anon;
 grant select on public.settings to anon;
 grant insert on public.inquiries to anon;
 
@@ -557,18 +855,27 @@ grant select, insert, update, delete on public.settings, public.applications, pu
 revoke insert, update, delete on public.profiles from authenticated;
 grant select on public.profiles to authenticated;
 grant update (full_name) on public.profiles to authenticated;
+grant select, insert, update, delete on public.cycles, public.team_members, public.info_sessions to authenticated;
+-- Sign-ups arrive only through register_for_session() and join_notify_list().
+revoke insert, update on public.session_registrations, public.notify_list from authenticated;
+grant select, delete on public.session_registrations, public.notify_list to authenticated;
 
 revoke execute on function public.claim_invite(text) from public, anon;
 revoke execute on function public.set_role(uuid, text) from public, anon;
 grant execute on function public.claim_invite(text) to authenticated;
 grant execute on function public.set_role(uuid, text) to authenticated;
+grant execute on function public.recruiting_public() to anon, authenticated;
+grant execute on function public.register_for_session(uuid, text, text, text) to anon, authenticated;
+grant execute on function public.join_notify_list(text, text) to anon, authenticated;
 
 
 -- ============================================================== file storage
--- Three private buckets. Files are only ever reached through short-lived signed links.
+-- Three private buckets, whose files are only ever reached through short-lived signed links,
+-- and one public bucket for the portraits on the team page.
 --   resumes       <user id>/<file>          the applicant and administrators
 --   engagements   <engagement id>/<file>    the client, the team and administrators
 --   library       <file>                    members read, administrators manage
+--   team          <team card id>/<file>     anyone sees; administrators and the person manage
 
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values
@@ -619,3 +926,21 @@ create policy "foreman library: admins upload" on storage.objects
 drop policy if exists "foreman library: admins delete" on storage.objects;
 create policy "foreman library: admins delete" on storage.objects
   for delete to authenticated using (bucket_id = 'library' and public.is_admin());
+
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('team', 'team', true, 5242880, array['image/jpeg', 'image/png', 'image/webp'])
+on conflict (id) do update
+  set public = true, file_size_limit = excluded.file_size_limit, allowed_mime_types = excluded.allowed_mime_types;
+
+drop policy if exists "foreman team: admins or the person read" on storage.objects;
+create policy "foreman team: admins or the person read" on storage.objects
+  for select to authenticated
+  using (bucket_id = 'team' and (public.is_admin() or public.owns_team_folder((storage.foldername(name))[1])));
+drop policy if exists "foreman team: admins or the person upload" on storage.objects;
+create policy "foreman team: admins or the person upload" on storage.objects
+  for insert to authenticated
+  with check (bucket_id = 'team' and (public.is_admin() or public.owns_team_folder((storage.foldername(name))[1])));
+drop policy if exists "foreman team: admins or the person delete" on storage.objects;
+create policy "foreman team: admins or the person delete" on storage.objects
+  for delete to authenticated
+  using (bucket_id = 'team' and (public.is_admin() or public.owns_team_folder((storage.foldername(name))[1])));

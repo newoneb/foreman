@@ -10,7 +10,13 @@
 
 [[redirects]]
   from = "/team"
-  to = "/about.html"
+  to = "/team.html"
+  status = 301
+
+# A short address for posters and QR codes.
+[[redirects]]
+  from = "/apply"
+  to = "/students.html"
   status = 301
 
 [[redirects]]

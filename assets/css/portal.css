@@ -956,3 +956,89 @@ a.p-strong:hover { text-decoration: underline; text-underline-offset: 0.22em; }
 }
 .p-foot a { color: var(--ink-2); }
 .p-noscript { padding: 48px var(--pad); }
+
+
+/* ---------------------------------------------------------------- recruiting and the team page (version 5) */
+
+.p-tablinks { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: clamp(36px, 4vw, 52px) 0 30px; border-bottom: 1px solid var(--line); }
+.p-tablinks a { position: relative; padding: 0 0 14px; color: var(--ink-3); font: 500 1rem/1.2 var(--sans); text-decoration: none; transition: color 0.2s ease; }
+.p-tablinks a::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--ink); transform: scaleX(0); transform-origin: left; transition: transform 0.35s var(--ease); }
+.p-tablinks a:hover { color: var(--ink); }
+.p-tablinks a[aria-current="page"] { color: var(--ink); }
+.p-tablinks a[aria-current="page"]::after { transform: none; }
+
+.p-head-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.p-td-actions { white-space: nowrap; text-align: right; }
+.p-td-actions .p-textbtn + .p-textbtn { margin-left: 16px; }
+.p-td-actions .p-confirm { white-space: normal; text-align: left; }
+
+.p-note-signal { border-left-color: var(--signal); }
+.wide-hint { flex-basis: 100%; }
+
+.p-recruit-line { display: flex; gap: 14px; align-items: baseline; max-width: 56em; padding: 18px 20px; border: 1px solid var(--line); background: var(--bg-soft); color: var(--ink-2); }
+.p-recruit-line strong { color: var(--ink); font-weight: 500; }
+.p-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--line-2); transform: translateY(-1px); }
+.p-recruit-line[data-phase="open"] .p-dot { background: var(--signal); }
+.p-recruit-line[data-phase="upcoming"] .p-dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--signal); }
+
+/* Info sessions in the portal */
+.p-sessions { border-top: 1px solid var(--line); }
+.p-session { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 20px; padding: 22px 0; border-bottom: 1px solid var(--line); }
+.p-session.is-past { color: var(--ink-2); }
+.p-session-date { display: grid; justify-items: center; align-content: start; align-self: start; gap: 2px; padding: 8px 4px 10px; border: 1px solid var(--line-2); }
+.p-session-date span { font: 500 0.6875rem/1.2 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--signal); }
+.p-session.is-past .p-session-date span { color: var(--ink-3); }
+.p-session-date b { font-family: var(--serif); font-weight: 400; font-size: 1.75rem; line-height: 1; }
+.p-session-main { display: grid; gap: 6px; min-width: 0; }
+.p-session-main h3 { font-size: 1.0625rem; font-weight: 500; }
+.p-session-count { font: 400 0.8125rem/1.5 var(--mono); color: var(--ink-3); word-spacing: -0.3em; }
+.p-session-actions { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 4px; }
+.p-regs { margin-top: 14px; padding: 18px 20px; background: var(--bg-soft); border: 1px solid var(--line); }
+.p-regs-inner { display: grid; gap: 16px; }
+.p-regs .p-table td, .p-regs .p-table th { background: transparent; }
+
+/* Forms: paired times, check boxes, team fieldsets and the photo */
+.p-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.p-check { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 12px; align-items: start; }
+.p-check input { width: 18px; height: 18px; margin: 3px 0 0; accent-color: var(--ink); }
+.p-check label { display: grid; gap: 2px; font-size: var(--fs-small); font-weight: 500; cursor: pointer; }
+.p-check .p-hint { font-weight: 400; }
+.p-checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 210px), 1fr)); gap: 12px 24px; margin-bottom: 8px; }
+.p-teams { display: grid; gap: 18px; margin: 0; padding: 22px 0 0; border: 0; border-top: 1px solid var(--line); min-width: 0; }
+.p-teams legend { float: left; width: 100%; margin-bottom: 4px; padding: 0; font-size: var(--fs-small); font-weight: 500; color: var(--ink); }
+.p-teams legend + * { clear: both; }
+.p-fs-2 { gap: 22px 24px; }
+.p-label { font-size: var(--fs-small); font-weight: 500; color: var(--ink); }
+.p-photo-row { display: flex; flex-wrap: wrap; align-items: center; gap: 20px; }
+.p-photo-row > div { display: grid; gap: 10px; justify-items: start; }
+.p-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.p-tag { display: inline-flex; padding: 2px 7px; border: 1px solid var(--line-2); border-radius: 2px; font: 500 0.6875rem/1.4 var(--mono); letter-spacing: 0.03em; text-transform: uppercase; color: var(--ink-3); white-space: nowrap; word-spacing: -0.3em; }
+.p-tag-signal { color: var(--signal); border-color: rgb(36 70 216 / 0.35); }
+
+/* Portrait thumbnails: initials on a drafting grid until a photo is added */
+.p-thumb {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  overflow: hidden;
+  background:
+    linear-gradient(var(--grid) 1px, transparent 1px) 0 0 / 100% 25%,
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0 / 25% 100%,
+    var(--bg-soft);
+  border: 1px solid var(--line);
+  font-family: var(--serif);
+  font-size: 0.9375rem;
+  color: var(--ink-3);
+}
+.p-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.p-thumb.has-photo { color: transparent; }
+.p-thumb-lg { width: 96px; height: 120px; font-size: 1.75rem; }
+.p-thumb-card { width: 100%; height: auto; aspect-ratio: 4 / 5; max-width: 220px; margin-bottom: 18px; font-size: 2.5rem; }
+.p-person-cell { display: flex; align-items: center; gap: 14px; }
+.p-person-cell .p-pill { margin-top: 6px; }
+.p-team td { vertical-align: middle; }
+.p-card-preview h2 { margin-top: 4px; }
+.p-filter-slot + * { margin-top: 28px; }

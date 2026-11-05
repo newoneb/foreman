@@ -1,9 +1,14 @@
 // Foreman portal: sign-in, the student application, client engagements, the member
-// library and the administration views. Each view has its own address (#apply,
+// library, recruiting (cycles, info sessions, the notify list), the team page and the
+// administration views. Each view has its own address (#apply,
 // #engagement-<id>, #applications), so any page can be bookmarked or shared with a
 // colleague who has access. Every read and write goes through db.js.
 
-import { db, inviteCode, MAX_FILE_MB, MAX_RESUME_MB } from "./db.js";
+import { db, inviteCode, MAX_FILE_MB, MAX_RESUME_MB, MAX_PHOTO_MB } from "./db.js";
+import {
+  zonedISO, zonedParts, todayISO, recruitingPhase, closesLabel, dayLong, dayShort, timeOf, timeRange, calendarDay, monthOf, dateOf,
+  daysUntil, initialsOf, TEAM_ORDER,
+} from "./recruit-shared.js";
 
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 const main = document.getElementById("portal-main");
@@ -34,7 +39,7 @@ const ROLE = { user: "Account", member: "Member", admin: "Administrator" };
 const TEAM_TITLES = ["Engagement manager", "Analyst", "Reviewer"];
 const CATEGORIES = ["Training", "Templates", "Guides", "Cases"];
 const YEARS = ["First-year", "Second-year", "Third-year", "Fourth-year", "Graduate student"];
-const HEARD = ["A friend or member", "Activities fair", "Instagram", "LinkedIn", "A class or professor", "Other"];
+const HEARD = ["A friend or member", "A poster", "An info session", "A coffee chat", "Activities fair", "Instagram", "LinkedIn", "A class or professor", "Other"];
 const WORD_LIMIT = 250;
 const QUESTIONS = [
   { name: "q1", label: "Why do you want to join Foreman?" },
@@ -72,6 +77,9 @@ const S = {
   linkNotice: "",
   prefill: null,
   appFilter: "submitted",
+  appCycle: null,
+  recruiter: false,
+  card: null,
   inqFilter: "new",
   peopleFilter: "all",
   keepScroll: false,
@@ -94,6 +102,9 @@ const ROUTES = {
   inquiries: { view: viewInquiries, roles: ["admin"] },
   people: { view: viewPeople, roles: ["admin"] },
   announcements: { view: viewAnnouncements, roles: ["admin"] },
+  recruiting: { view: viewRecruiting, roles: ["member", "admin"] },
+  team: { view: viewTeam, roles: ["admin"] },
+  profile: { view: viewProfile, roles: ["member", "admin"] },
 };
 
 init();
@@ -136,8 +147,15 @@ async function refresh() {
   S.clientEngagements = [];
   S.hasApplication = false;
   S.counts = { inquiries: 0, applications: 0 };
+  S.recruiter = false;
+  S.card = null;
   if (S.profile) {
     S.links = await db.myLinks();
+    if (S.profile.role !== "user") {
+      const info = await db.recruiterInfo().catch(() => ({ recruiter: false, card: null }));
+      S.recruiter = info.recruiter;
+      S.card = info.card;
+    }
     if (S.profile.role === "user") {
       const [engagements, application] = await Promise.all([S.links.length ? db.listEngagements() : [], db.myApplication()]);
       S.clientEngagements = engagements.filter((e) => e.my_kind === "client");
@@ -273,6 +291,8 @@ function renderNav() {
   if (p.role === "admin") {
     item("overview", "Overview");
     item("applications", "Applications", S.counts.applications);
+    item("recruiting", "Recruiting");
+    item("team", "Team page");
     item("inquiries", "Inquiries", S.counts.inquiries);
     item("engagements", "Engagements");
     item("people", "People");
@@ -283,6 +303,9 @@ function renderNav() {
     item("home", "Home");
     item("engagements", "Engagements");
     item("library", "Library");
+    if (S.recruiter || S.card) items.push("sep");
+    if (S.recruiter) item("recruiting", "Recruiting");
+    if (S.card) item("profile", "Your team profile");
   } else {
     item("home", "Home");
     for (const e of S.clientEngagements) item(`engagement-${e.id}`, e.company);
@@ -301,7 +324,7 @@ function renderNav() {
 function markNav() {
   const current = location.hash.slice(1);
   const view = current.split("-")[0];
-  const parent = { application: "applications", engagement: "engagements" }[view];
+  const parent = { application: "applications", engagement: "engagements", recruiting: "recruiting" }[view];
   const links = [...nav.querySelectorAll("a[data-hash]")];
   const exact = links.some((a) => a.dataset.hash === current);
   for (const a of links) {
@@ -754,15 +777,15 @@ async function viewHome(t) {
   if (p.role === "admin") return go("overview", true);
   if (p.role === "member") return memberHome(t);
 
-  const [engagements, application, settings] = await Promise.all([
-    S.links.length ? db.listEngagements() : [], db.myApplication(), db.getSettings(),
+  const [engagements, application, recruiting] = await Promise.all([
+    S.links.length ? db.listEngagements() : [], db.myApplication(), db.recruitingPublic().catch(() => null),
   ]);
   const mine = engagements.filter((e) => e.my_kind === "client");
   S.hasApplication = Boolean(application);
   screen(t, { title: p.full_name ? `Welcome, ${firstName(p)}.` : "Welcome.", sub: today() },
     mine.length ? sec({ title: mine.length === 1 ? "Your engagement" : "Your engagements" }, engagementCards(mine)) : null,
     h("div", { class: "p-cards" },
-      mine.length && !application ? null : applicationCard(application, settings),
+      mine.length && !application ? null : applicationCard(application, recruitingPhase(recruiting || {}), recruiting),
       inviteCard(mine.length > 0)));
 }
 
@@ -798,20 +821,24 @@ function announcementList(list) {
     a.body ? h("p", {}, a.body) : null)));
 }
 
-function applicationCard(application, settings) {
+function applicationCard(application, state, recruiting) {
   if (!application) {
-    if (!settings.applications_open) {
-      return h("section", { class: "p-card" }, h("h2", {}, "Applications are closed"), h("p", { class: "p-card-text" }, "We are not accepting new applications at the moment. Please check back soon."));
+    if (state.phase === "closed") {
+      return h("section", { class: "p-card" }, h("h2", {}, "Applications are closed"),
+        h("p", { class: "p-card-text" }, "We recruit at the start of each quarter. The recruiting calendar on the Students page shows when the next cycle opens, and you can ask to be told."),
+        h("div", { class: "actions" }, h("a", { class: "link", href: "../students.html#apply" }, "Tell me when applications open", icon("arrow"))));
     }
     return h("section", { class: "p-card" },
-      h("h2", {}, "Apply to join Foreman"),
-      h("p", { class: "p-card-text" }, "Train in accounting, valuation and operations, then advise Chicago business owners. Your resume and three short answers are all we ask for."),
-      h("div", { class: "actions" }, h("a", { class: "btn", href: "#apply" }, "Start your application", icon("arrow"))));
+      h("h2", {}, state.phase === "open" ? "Apply to join Foreman" : `${state.cycle.name} applications open ${dayLong(state.cycle.opens_at)}`),
+      h("p", { class: "p-card-text" }, state.phase === "open"
+        ? `Applications for ${state.cycle.name} close ${closesLabel(state.cycle.closes_at)}. Your resume and three short answers are all we ask for.`
+        : "You can start a draft now and submit it once applications open. Your resume and three short answers are all we ask for."),
+      h("div", { class: "actions" }, h("a", { class: "btn", href: "#apply" }, state.phase === "open" ? "Start your application" : "Start a draft", icon("arrow"))));
   }
   return h("section", { class: "p-card" },
     h("h2", {}, "Your application"),
     h("p", { class: "p-card-text" }, pill(APP_STATUS[application.status], APP_TONE[application.status])),
-    h("p", { class: "p-card-text" }, applicationStatusText(application)),
+    h("p", { class: "p-card-text" }, applicationStatusText(application, recruiting)),
     h("div", { class: "actions" }, arrowLink("#apply", application.status === "draft" ? "Continue your application" : "View your application")));
 }
 
@@ -845,10 +872,17 @@ function inviteCard(already = false) {
 
 // ---------------------------------------------------------------- the student application
 
-function applicationStatusText(a) {
+// The decision date of the cycle an application belongs to, when the public calendar has it.
+function decisionsFor(a, recruiting) {
+  const c = recruiting && [recruiting.cycle, recruiting.last, recruiting.next].find((x) => x && x.id === a.cycle_id);
+  return c && c.decisions_by ? calendarDay(c.decisions_by) : "";
+}
+
+function applicationStatusText(a, recruiting) {
+  const by = decisionsFor(a, recruiting);
   switch (a.status) {
-    case "draft": return "Your draft is saved. Submit it when you are ready.";
-    case "submitted": return `Submitted on ${date(a.submitted_at)}. We review applications on a rolling basis and will email you about next steps.`;
+    case "draft": return "Your draft is saved. Submit it while applications are open.";
+    case "submitted": return `Submitted on ${date(a.submitted_at)}. We review applications after the deadline${by ? ` and share decisions by ${by}` : ""}, and we will email you about next steps.`;
     case "interview_1": return "You are invited to a first interview. We will email you to arrange a time.";
     case "interview_2": return "You are invited to a case interview. We will email you to arrange a time.";
     case "accepted": return "Welcome to Foreman. Your member access is active.";
@@ -858,22 +892,36 @@ function applicationStatusText(a) {
 }
 
 async function viewApply(t) {
-  const [application, settings] = await Promise.all([db.myApplication(), db.getSettings()]);
+  const [application, recruiting] = await Promise.all([db.myApplication(), db.recruitingPublic().catch(() => null)]);
   if (t !== token) return;
   S.hasApplication = Boolean(application);
-  if (!application && !settings.applications_open) {
-    return screen(t, { title: "Applications are closed.", sub: "We are not accepting new applications at the moment. Please check back soon." },
-      arrowLink("../students.html", "About membership"));
+  const state = recruitingPhase(recruiting || {});
+  if (!application && state.phase === "closed") {
+    return screen(t, { title: "Applications are closed.", sub: "We recruit at the start of each quarter. The next cycle hasn't been scheduled yet." },
+      h("div", { class: "actions" },
+        h("a", { class: "btn", href: "../students.html#apply" }, "Tell me when applications open", icon("arrow")),
+        arrowLink("../students.html#cycle", "Recruiting calendar")));
   }
   const editing = !application || application.status === "draft";
+  // A returned application keeps its cycle and can be sent back at any time.
+  const canSubmit = state.phase === "open" || Boolean(application && application.cycle_id);
+  let cycleNote = null;
+  if (editing && !(application && application.cycle_id)) {
+    cycleNote = state.phase === "open"
+      ? h("aside", { class: "p-note p-note-signal" }, h("h2", {}, `${state.cycle.name} applications are open`), h("p", {}, `Submit by ${closesLabel(state.cycle.closes_at)}.`))
+      : state.phase === "upcoming"
+        ? h("aside", { class: "p-note" }, h("h2", {}, `${state.cycle.name} applications open ${dayLong(state.cycle.opens_at)}`), h("p", {}, "Your draft saves as you write. You can submit it once applications open."))
+        : h("aside", { class: "p-note" }, h("h2", {}, "Applications are closed"), h("p", {}, "Your draft is saved. You can submit it when the next cycle opens."));
+  }
   screen(t, {
     title: "Your application",
-    sub: editing ? "Answer in your own words. Your draft saves as you write, so you can return to it at any time." : applicationStatusText(application),
+    sub: editing ? "Answer in your own words. Your draft saves as you write, so you can return to it at any time." : applicationStatusText(application, recruiting),
   },
   tracker(application ? application.status : "draft"),
+  cycleNote,
   db.demo ? h("aside", { class: "p-note" }, h("h2", {}, "Demo mode"), h("p", {}, "This portal isn't connected yet, so applications stay in this browser and are not sent to Foreman.")) : null,
   application && application.message ? h("aside", { class: "p-note" }, h("h2", {}, "A note from Foreman"), h("p", {}, application.message)) : null,
-  editing ? applicationForm(application) : applicationSummary(application));
+  editing ? applicationForm(application, canSubmit ? null : (state.phase === "upcoming" ? `You can submit once applications open on ${dayLong(state.cycle.opens_at)}.` : "Applications are closed. You can submit when the next cycle opens.")) : applicationSummary(application));
 }
 
 function tracker(status) {
@@ -889,14 +937,14 @@ function tracker(status) {
   }));
 }
 
-function applicationForm(existing) {
+function applicationForm(existing, locked = null) {
   let current = existing;
   const a = (existing && existing.answers) || {};
   const msg = h("p", { class: "p-save", role: "status" }, current ? `Draft saved ${time(current.updated_at)}` : "");
   const resumeBox = h("div", { class: "p-resume" });
-  const submitBtn = h("button", { class: "btn", type: "submit" }, "Submit application", icon("arrow"));
+  const submitBtn = h("button", { class: "btn", type: "submit", disabled: Boolean(locked), title: locked || null }, "Submit application", icon("arrow"));
   const saveBtn = h("button", { class: "btn btn-quiet", type: "button" }, "Save draft");
-  const actions = h("div", { class: "p-form-actions" }, submitBtn, saveBtn, msg);
+  const actions = h("div", { class: "p-form-actions" }, submitBtn, saveBtn, msg, locked ? h("p", { class: "p-hint wide-hint" }, locked) : null);
 
   const answer = (q) => {
     const id = `field-${++fieldCount}`;
@@ -1017,6 +1065,7 @@ function applicationForm(existing) {
     e.preventDefault();
     clearTimeout(timer);
     await save();
+    if (locked) { say(msg, locked, "bad"); return; }
     const issues = problems();
     form.querySelectorAll("[aria-invalid]").forEach((el) => el.removeAttribute("aria-invalid"));
     if (issues.length) {
@@ -1545,7 +1594,9 @@ function newEngagementForm(prefill, close) {
 // ---------------------------------------------------------------- administration
 
 async function viewOverview(t) {
-  const [inquiries, applications, engagements, profiles] = await Promise.all([db.listInquiries(), db.listApplications(), db.listEngagements(), db.listProfiles()]);
+  const [inquiries, applications, engagements, profiles, cycles, sessions] = await Promise.all([
+    db.listInquiries(), db.listApplications(), db.listEngagements(), db.listProfiles(), db.listCycles(), db.listSessions(),
+  ]);
   await updateCounts(inquiries, applications);
   const inReview = applications.filter((a) => ["submitted", "interview_1", "interview_2"].includes(a.status));
   const active = engagements.filter((e) => e.stage !== "complete");
@@ -1561,8 +1612,21 @@ async function viewOverview(t) {
         inquiries.length ? h("ul", { class: "p-lines" }, inquiries.slice(0, 4).map(inquiryLine)) : empty("No inquiries yet.")),
       sec({ title: "Applications in progress", action: arrowLink("#applications", "All applications") },
         inReview.length ? h("ul", { class: "p-lines" }, inReview.slice(0, 5).map(applicationLine)) : empty("Nothing waiting for review."))),
+    recruitingSummary(cycles, sessions, applications),
     sec({ title: "Engagements in progress", action: arrowLink("#engagements", "All engagements") },
       active.length ? engagementTable(active) : empty("No engagements in progress.")));
+}
+
+function recruitingSummary(cycles, sessions, applications) {
+  const state = phaseOfCycles(cycles);
+  const next = sessions.filter((s) => new Date(s.ends_at) > Date.now()).sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at)))[0];
+  const submitted = state.phase !== "closed" ? applications.filter((a) => a.cycle_id === state.cycle.id && a.status !== "draft").length : 0;
+  return sec({ title: "Recruiting", action: arrowLink("#recruiting", "Open recruiting") },
+    h("div", { class: "p-recruit-line", "data-phase": state.phase },
+      h("span", { class: "p-dot", "aria-hidden": "true" }),
+      h("p", {}, h("strong", {}, phaseSentence(state)),
+        state.phase === "open" ? ` ${submitted} ${submitted === 1 ? "application" : "applications"} submitted so far.` : "",
+        next ? ` Next info session: ${dayLong(next.starts_at)}, ${timeOf(next.starts_at)}, ${next.registered} signed up.` : "")));
 }
 
 function inquiryLine(i) {
@@ -1595,47 +1659,67 @@ function filterBar(groups, counts, current, onPick, label) {
 }
 
 async function viewApplications(t) {
-  const [applications, settings] = await Promise.all([db.listApplications(), db.getSettings()]);
+  const [applications, cycles] = await Promise.all([db.listApplications(), db.listCycles()]);
   await updateCounts(null, applications);
+  const state = phaseOfCycles(cycles);
+  // Drafts join a cycle when they are submitted, so they are counted with the active one.
+  const active = state.phase !== "closed" ? state.cycle : null;
+  if (!S.appCycle || (S.appCycle !== "all" && S.appCycle !== "none" && !cycles.some((c) => c.id === S.appCycle))) {
+    S.appCycle = (active || cycles[0] || {}).id || "all";
+  }
+  const inCycle = (a) => S.appCycle === "all"
+    || (S.appCycle === "none" ? !a.cycle_id && a.status !== "draft" : a.cycle_id === S.appCycle || (!a.cycle_id && a.status === "draft" && active && active.id === S.appCycle));
   const groups = [["submitted", "Under review"], ["interview_1", "First interview"], ["interview_2", "Case interview"], ["accepted", "Accepted"], ["declined", "Declined"], ["draft", "Drafts"], ["all", "All"]];
-  const counts = Object.fromEntries(groups.map(([k]) => [k, k === "all" ? applications.length : applications.filter((a) => a.status === k).length]));
+  const barSlot = h("div", { class: "p-filter-slot" });
   const slot = h("div");
+  const cycleName = (id) => (cycles.find((c) => c.id === id) || {}).name || "";
+  const visible = () => applications.filter(inCycle).filter((a) => S.appFilter === "all" || a.status === S.appFilter);
   const draw = () => {
-    const rows = S.appFilter === "all" ? applications : applications.filter((a) => a.status === S.appFilter);
-    slot.replaceChildren(rows.length ? applicationsTable(rows) : empty(S.appFilter === "draft" ? "No drafts in progress." : "No applications here."));
+    const pool = applications.filter(inCycle);
+    const counts = Object.fromEntries(groups.map(([k]) => [k, k === "all" ? pool.length : pool.filter((a) => a.status === k).length]));
+    barSlot.replaceChildren(filterBar(groups, counts, S.appFilter, (k) => { S.appFilter = k; draw(); }, "Filter applications"));
+    const rows = visible();
+    slot.replaceChildren(rows.length ? applicationsTable(rows, S.appCycle === "all" ? cycleName : null) : empty(S.appFilter === "draft" ? "No drafts in progress." : "No applications here."));
   };
+  const picker = h("select", { class: "p-select", "aria-label": "Recruiting cycle" },
+    cycles.map((c) => h("option", { value: c.id, selected: c.id === S.appCycle }, `${c.name}${cycleStatus(c)[0] === "Open" ? " (open)" : ""}`)),
+    h("option", { value: "all", selected: S.appCycle === "all" }, "All cycles"),
+    applications.some((a) => !a.cycle_id && a.status !== "draft") ? h("option", { value: "none", selected: S.appCycle === "none" }, "Before cycles") : null);
+  picker.addEventListener("change", () => { S.appCycle = picker.value; draw(); });
+  const exportBtn = h("button", { type: "button", class: "btn btn-quiet btn-small" }, "Download CSV");
+  exportBtn.addEventListener("click", () => {
+    const rows = visible();
+    if (!rows.length) { toast("There are no applications in this view.", "bad"); return; }
+    downloadFile(`foreman-applications-${S.appCycle === "all" ? "all" : (cycleName(S.appCycle) || "cycle").toLowerCase().replace(/[^a-z0-9]+/g, "-")}.csv`, csv([
+      ["Name", "Email", "Status", "Cycle", "Year", "Major", "Graduation", "Phone", "LinkedIn", "Heard about us", "Submitted", "Reviews", "Average score"],
+      ...rows.map((a) => {
+        const ans = a.answers || {};
+        return [a.full_name, a.email, APP_STATUS[a.status], cycleName(a.cycle_id), ans.year, ans.major, ans.graduation, ans.phone, ans.linkedin, ans.heard,
+          a.submitted_at ? dateTime(a.submitted_at) : "", a.review_count || 0, a.review_avg ?? ""];
+      }),
+    ]));
+  });
   draw();
-  screen(t, { title: "Applications", sub: "Admissions are rolling. Open an application to review it, record interviews and decide.", actions: admissionsSwitch(settings) },
-    filterBar(groups, counts, S.appFilter, (k) => { S.appFilter = k; draw(); }, "Filter applications"),
+  const sub = !cycles.length
+    ? "No recruiting cycle is scheduled, so applications are closed. Schedule one under Recruiting."
+    : active
+      ? `${active.name} ${state.phase === "open" ? `is open until ${closesLabel(active.closes_at)}` : `opens ${dayLong(active.opens_at)}`}. Open an application to review it, record interviews and decide.`
+      : "Applications are closed until the next cycle is scheduled. Open an application to review it, record interviews and decide.";
+  screen(t, { title: "Applications", sub, actions: h("div", { class: "p-head-tools" }, picker, exportBtn) },
+    barSlot,
     slot);
 }
 
-function admissionsSwitch(settings) {
-  const sw = h("button", { type: "button", role: "switch", class: "p-switch", "aria-checked": String(settings.applications_open) },
-    h("i", { "aria-hidden": "true" }), h("span", {}, "Accepting applications"));
-  sw.addEventListener("click", async () => {
-    const next = sw.getAttribute("aria-checked") !== "true";
-    sw.setAttribute("aria-checked", String(next));
-    try {
-      await db.setSetting("applications_open", next);
-      toast(next ? "Applications are open." : "Applications are closed. New applicants will see a notice.");
-    } catch (err) {
-      sw.setAttribute("aria-checked", String(!next));
-      toast(err.message, "bad");
-    }
-  });
-  return sw;
-}
-
-function applicationsTable(rows) {
+function applicationsTable(rows, cycleName = null) {
   const table = h("table", { class: "p-table" },
-    h("thead", {}, h("tr", {}, ["Applicant", "Year", "Major", "Submitted", "Reviews", "Status"].map((c) => h("th", { scope: "col" }, c)))),
+    h("thead", {}, h("tr", {}, ["Applicant", "Year", "Major", cycleName ? "Cycle" : null, "Submitted", "Reviews", "Status"].filter(Boolean).map((c) => h("th", { scope: "col" }, c)))),
     h("tbody", {}, rows.map((a) => {
       const ans = a.answers || {};
       return h("tr", { "data-href": `application-${a.id}` },
         h("td", {}, h("a", { class: "p-strong", href: `#application-${a.id}` }, a.full_name || "Unnamed applicant"), h("span", { class: "p-sub2" }, a.email)),
         h("td", {}, ans.year || "—"),
         h("td", {}, ans.major || "—"),
+        cycleName ? h("td", {}, cycleName(a.cycle_id) || "—") : null,
         h("td", {}, a.submitted_at ? date(a.submitted_at) : "—"),
         h("td", {}, a.review_count ? `${a.review_count} · ${a.review_avg ?? "–"} / 5` : "—"),
         h("td", {}, pill(APP_STATUS[a.status], APP_TONE[a.status])));
@@ -1919,6 +2003,536 @@ async function viewAnnouncements(t) {
       h("aside", { class: "p-aside" }, h("section", { class: "p-card" }, h("h2", {}, "New announcement"), form))));
 }
 
+// ---------------------------------------------------------------- recruiting
+
+function phaseOfCycles(cycles, now = Date.now()) {
+  const byOpen = (a, b) => String(a.opens_at).localeCompare(String(b.opens_at));
+  const open = cycles.filter((c) => new Date(c.opens_at) <= now && new Date(c.closes_at) > now).sort(byOpen)[0] || null;
+  const next = cycles.filter((c) => new Date(c.opens_at) > now).sort(byOpen)[0] || null;
+  const last = cycles.filter((c) => new Date(c.closes_at) <= now).sort((a, b) => String(b.closes_at).localeCompare(String(a.closes_at)))[0] || null;
+  return recruitingPhase({ cycle: open, next, last }, now);
+}
+
+function cycleStatus(c, now = Date.now()) {
+  if (new Date(c.opens_at) > now) return ["Upcoming", "active"];
+  if (new Date(c.closes_at) > now) return ["Open", "ok"];
+  return ["Closed", "muted"];
+}
+
+function phaseSentence(state) {
+  if (state.phase === "open") return `${state.cycle.name} is open until ${closesLabel(state.cycle.closes_at)}.`;
+  if (state.phase === "upcoming") return `${state.cycle.name} opens ${dayLong(state.cycle.opens_at)}. Students can start drafts now.`;
+  return "No cycle is open or scheduled, so applications are closed.";
+}
+
+const dateCT = (iso) => `${dayShort(iso)}, ${zonedParts(iso).day.slice(0, 4)}`;
+const timeCT = (iso) => `${timeOf(iso)} CT`;
+const stem = (text) => String(text || "export").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+
+// Spreadsheet-safe CSV: cells that look like formulas are kept as text.
+function csv(rows) {
+  const cell = (v) => {
+    let text = String(v ?? "");
+    if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+    return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  };
+  return `${rows.map((row) => row.map(cell).join(",")).join("\r\n")}\r\n`;
+}
+
+function downloadFile(name, text, type = "text/csv") {
+  const url = URL.createObjectURL(new Blob(["﻿", text], { type: `${type};charset=utf-8` }));
+  const a = h("a", { href: url, download: name, hidden: true });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+async function copyList(text, what) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(`${what} copied. Paste them into the BCC line of an email.`);
+  } catch (_) {
+    toast("This browser didn't allow copying. Use Download CSV instead.", "bad");
+  }
+}
+
+function check({ name, label, checked, hint }) {
+  const id = `field-${++fieldCount}`;
+  return h("div", { class: "p-check" },
+    h("input", { id, type: "checkbox", name, checked }),
+    h("label", { for: id }, h("span", {}, label), hint ? h("span", { class: "p-hint" }, hint) : null));
+}
+
+const httpsOk = (url) => !url || /^https:\/\/[^\s]+$/i.test(url);
+const emailOk = (email) => !email || /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email);
+
+async function viewRecruiting(t, tab = "") {
+  if (!S.recruiter) return go(defaultView(), true);
+  const admin = S.profile.role === "admin";
+  const [cycles, sessions, notify, applications] = await Promise.all([
+    db.listCycles(), db.listSessions(), db.listNotify(), admin ? db.listApplications() : Promise.resolve([]),
+  ]);
+  const state = phaseOfCycles(cycles);
+  const now = Date.now();
+  const upcoming = sessions.filter((s) => new Date(s.ends_at) > now).sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at)));
+  const past = sessions.filter((s) => new Date(s.ends_at) <= now);
+  const current = state.phase !== "closed" ? state.cycle : null;
+  const tabs = [["", "Cycles"], ["sessions", "Info sessions"], ["notify", "Notify list"]];
+  const which = tabs.some(([k]) => k === tab) ? tab : "";
+  const stat = (n, label, href) => h(href ? "a" : "div", { class: "p-stat", href }, h("b", { "data-count": String(n) }, String(n)), h("span", {}, label));
+  const body = which === "sessions" ? sessionsTab(upcoming, past, cycles, state)
+    : which === "notify" ? notifyTab(notify)
+      : cyclesTab(cycles, applications, admin);
+  screen(t, {
+    title: "Recruiting",
+    sub: phaseSentence(state),
+    actions: h("a", { class: "link", href: "../students.html", target: "_blank", rel: "noopener" }, "Students page", icon("external")),
+  },
+  h("div", { class: "p-stats" },
+    state.phase === "closed"
+      ? stat(cycles.length, cycles.length === 1 ? "Cycle so far" : "Cycles so far", null)
+      : stat(daysUntil(state.until), state.phase === "open" ? "Days until applications close" : "Days until applications open", null),
+    admin
+      ? stat(current ? applications.filter((a) => a.cycle_id === current.id && a.status !== "draft").length : 0, current ? `Submitted for ${current.name}` : "Submitted this cycle", "#applications")
+      : stat(upcoming.length, "Upcoming info sessions", "#recruiting-sessions"),
+    stat(upcoming.reduce((n, s) => n + s.registered, 0), "Signed up for upcoming sessions", "#recruiting-sessions"),
+    stat(notify.length, "Waiting to hear when applications open", "#recruiting-notify")),
+  h("nav", { class: "p-tabs p-tablinks", "aria-label": "Recruiting" },
+    tabs.map(([k, label]) => h("a", { href: `#recruiting${k ? `-${k}` : ""}`, "aria-current": k === which ? "page" : null }, label))),
+  body);
+}
+
+// ---- cycles
+
+function cyclesTab(cycles, applications, admin) {
+  const editor = admin ? formPanel("Schedule a cycle", (c, close) => cycleForm(c, close), (c) => `Edit ${c.name}`) : null;
+  const count = (c) => applications.filter((a) => a.cycle_id === c.id && a.status !== "draft").length;
+  const head = ["Cycle", "Opens", "Closes", "Decisions by", admin ? "Submitted" : null, "Status", admin ? "" : null].filter((c) => c !== null);
+  return h("div", {},
+    h("p", { class: "p-lead" }, "Applications are accepted only while a cycle is open. Students can start a draft once a cycle is scheduled, and the Students page counts down to each date. Every time is Chicago time."),
+    editor ? editor.panel : null,
+    cycles.length ? h("div", { class: "p-table-wrap" }, h("table", { class: "p-table" },
+      h("thead", {}, h("tr", {}, head.map((c) => h("th", { scope: "col" }, c)))),
+      h("tbody", {}, cycles.map((c) => {
+        const [label, tone] = cycleStatus(c);
+        return h("tr", {},
+          h("td", {}, h("span", { class: "p-strong" }, c.name), c.note ? h("span", { class: "p-sub2" }, c.note) : null),
+          h("td", {}, dateCT(c.opens_at), h("span", { class: "p-sub2" }, timeCT(c.opens_at))),
+          h("td", {}, dateCT(c.closes_at), h("span", { class: "p-sub2" }, timeCT(c.closes_at))),
+          h("td", {}, c.decisions_by ? date(c.decisions_by) : "—"),
+          admin ? h("td", {}, String(count(c))) : null,
+          h("td", {}, pill(label, tone)),
+          admin ? h("td", { class: "p-td-actions" },
+            textBtn("Edit", () => editor.open(c)),
+            textBtn("Delete", (e) => confirmInline(e.currentTarget, {
+              text: `Delete ${c.name}? Applications submitted in it are kept, without a cycle.`, yes: "Delete cycle", danger: true,
+            }, async () => {
+              await db.deleteCycle(c.id);
+              await again();
+              toast(`${c.name} deleted.`);
+            }), "danger")) : null);
+      })))) : empty(admin ? "No cycles yet. Schedule the first one above. Applications open on its start date." : "No cycles are scheduled yet."));
+}
+
+// A panel holding a create form, which also edits an existing record when asked.
+function formPanel(title, build, editTitle) {
+  const slot = h("div");
+  const summary = h("summary", {}, title);
+  const panel = h("details", { class: "p-disclose p-disclose-panel" }, summary, slot);
+  const draw = (record) => {
+    summary.textContent = record ? editTitle(record) : title;
+    slot.replaceChildren(build(record, () => { draw(null); panel.open = false; }));
+  };
+  draw(null);
+  return {
+    panel,
+    open(record) {
+      draw(record);
+      panel.open = true;
+      panel.scrollIntoView({ block: "start", behavior: reduceMotion ? "auto" : "smooth" });
+      const first = slot.querySelector("input, select, textarea");
+      if (first) first.focus({ preventScroll: true });
+    },
+  };
+}
+
+function cycleForm(c, close) {
+  const opens = c ? zonedParts(c.opens_at) : { day: "", time: "09:00" };
+  const closes = c ? zonedParts(c.closes_at) : { day: "", time: "23:59" };
+  const msg = h("p", { class: "p-form-msg", role: "status", hidden: true });
+  const submit = h("button", { class: "btn btn-small", type: "submit" }, c ? "Save changes" : "Schedule cycle");
+  const form = h("form", { class: "form p-panel-form" },
+    field({ label: "Name", name: "name", required: true, value: c ? c.name : "", placeholder: "Winter 2027", wide: true, hint: "Shown to students, for example Winter 2027." }),
+    field({ label: "Applications open", name: "opens_day", type: "date", required: true, value: opens.day }),
+    field({ label: "At (Chicago time)", name: "opens_time", type: "time", required: true, value: opens.time }),
+    field({ label: "Applications close", name: "closes_day", type: "date", required: true, value: closes.day }),
+    field({ label: "At (Chicago time)", name: "closes_time", type: "time", required: true, value: closes.time }),
+    field({ label: "Decisions by", name: "decisions_by", type: "date", optional: true, value: c ? c.decisions_by || "" : "", hint: "Shown on the recruiting calendar and to applicants." }),
+    field({ label: "Note for the recruiting team", name: "note", type: "textarea", rows: 2, optional: true, value: c ? c.note || "" : "", wide: true, hint: "Never shown on the website." }),
+    msg,
+    h("div", { class: "p-form-actions wide" }, submit, c ? textBtn("Cancel", close) : null));
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (!form.checkValidity()) { form.reportValidity(); return; }
+    const d = formData(form);
+    const opens_at = zonedISO(d.opens_day, d.opens_time);
+    const closes_at = zonedISO(d.closes_day, d.closes_time);
+    if (new Date(closes_at) <= new Date(opens_at)) { say(msg, "Applications have to close after they open.", "bad"); return; }
+    if (d.decisions_by && d.decisions_by < d.closes_day) { say(msg, "Decisions should come after applications close.", "bad"); return; }
+    say(msg, "");
+    act(submit, "Saving…", async () => {
+      await db.saveCycle({ name: d.name, opens_at, closes_at, decisions_by: d.decisions_by || null, note: d.note || "" }, c ? c.id : null);
+      await again();
+      toast(c ? "Cycle updated." : `${d.name} is scheduled.`);
+    });
+  });
+  return form;
+}
+
+// ---- info sessions
+
+function sessionsTab(upcoming, past, cycles, state) {
+  const editor = formPanel("Add an info session", (s, close) => sessionForm(s, cycles, state, close), (s) => `Edit ${s.title}`);
+  return h("div", {},
+    h("p", { class: "p-lead" }, "Sessions appear on the Students page as soon as they are saved. Visitors register there; online sessions show their link only to people who register."),
+    editor.panel,
+    sec({ title: "Upcoming", note: String(upcoming.length) },
+      upcoming.length ? h("ul", { class: "p-sessions" }, upcoming.map((s) => sessionRow(s, editor))) : empty("No upcoming sessions.")),
+    past.length ? h("details", { class: "p-disclose" }, h("summary", {}, `Past sessions (${past.length})`),
+      h("ul", { class: "p-sessions" }, past.sort((a, b) => String(b.starts_at).localeCompare(String(a.starts_at))).map((s) => sessionRow(s, editor, true)))) : null);
+}
+
+function sessionRow(s, editor, isPast = false) {
+  const regs = h("div", { class: "p-regs", hidden: true });
+  let loaded = false;
+  const toggle = h("button", { type: "button", class: "p-textbtn", "aria-expanded": "false" }, `Sign-ups (${s.registered})`);
+  toggle.addEventListener("click", async () => {
+    const opening = regs.hidden;
+    regs.hidden = !opening;
+    toggle.setAttribute("aria-expanded", String(opening));
+    if (!opening || loaded) return;
+    loaded = true;
+    regs.replaceChildren(h("p", { class: "p-hint" }, "Loading…"));
+    try {
+      regs.replaceChildren(registrationsPanel(s, await db.listRegistrations(s.id)));
+    } catch (err) {
+      loaded = false;
+      regs.replaceChildren(empty(err.message));
+    }
+  });
+  const where = [s.location, s.meeting_url ? "online" : ""].filter(Boolean).join(" and ") || "place to be announced";
+  return h("li", { class: `p-session${isPast ? " is-past" : ""}` },
+    h("div", { class: "p-session-date", "aria-hidden": "true" }, h("span", {}, monthOf(s.starts_at)), h("b", {}, dateOf(s.starts_at))),
+    h("div", { class: "p-session-main" },
+      h("h3", {}, s.title),
+      h("p", { class: "p-sub2" }, `${dayLong(s.starts_at)} · ${timeRange(s.starts_at, s.ends_at)} CT · ${where}`),
+      h("p", { class: "p-session-count" }, s.capacity ? `${s.registered} of ${s.capacity} seats taken` : `${s.registered} signed up`),
+      h("div", { class: "p-session-actions" },
+        toggle,
+        isPast ? null : textBtn("Edit", () => editor.open(s)),
+        textBtn("Delete", (e) => confirmInline(e.currentTarget, {
+          text: `Delete “${s.title}” on ${dayLong(s.starts_at)}? Its sign-ups are deleted with it.`, yes: "Delete session", danger: true,
+        }, async () => {
+          await db.deleteSession(s.id);
+          await again();
+          toast("Session deleted.");
+        }), "danger")),
+      regs));
+}
+
+function registrationsPanel(s, list) {
+  if (!list.length) return empty("No one has signed up yet.");
+  const file = `foreman-${stem(s.title)}-${zonedParts(s.starts_at).day}.csv`;
+  return h("div", { class: "p-regs-inner" },
+    h("div", { class: "p-form-actions" },
+      h("button", { type: "button", class: "btn btn-quiet btn-small", onclick: () => copyList(list.map((r) => r.email).join(", "), "Emails") }, "Copy emails"),
+      h("button", { type: "button", class: "btn btn-quiet btn-small", onclick: () => downloadFile(file, csv([["Name", "Email", "Year", "Signed up"], ...list.map((r) => [r.name, r.email, r.year, dateTime(r.created_at)])])) }, "Download CSV")),
+    h("div", { class: "p-table-wrap" }, h("table", { class: "p-table" },
+      h("thead", {}, h("tr", {}, ["Name", "Email", "Year", "Signed up", ""].map((c) => h("th", { scope: "col" }, c)))),
+      h("tbody", {}, list.map((r) => h("tr", {},
+        h("td", {}, h("span", { class: "p-strong" }, r.name)),
+        h("td", {}, r.email),
+        h("td", {}, r.year || "—"),
+        h("td", {}, ago(r.created_at)),
+        h("td", { class: "p-td-actions" }, textBtn("Remove", (e) => confirmInline(e.currentTarget, { text: `Remove ${r.name} from this session?`, yes: "Remove", danger: true }, async () => {
+          await db.deleteRegistration(r.id);
+          await again();
+          toast("Removed.");
+        }), "danger"))))))));
+}
+
+function sessionForm(s, cycles, state, close) {
+  const start = s ? zonedParts(s.starts_at) : { day: "", time: "18:00" };
+  const end = s ? zonedParts(s.ends_at) : { day: "", time: "19:00" };
+  const live = cycles.filter((c) => new Date(c.closes_at) > Date.now() || (s && s.cycle_id === c.id));
+  const preset = s ? s.cycle_id || "" : (state.phase !== "closed" ? state.cycle.id : "");
+  const msg = h("p", { class: "p-form-msg", role: "status", hidden: true });
+  const submit = h("button", { class: "btn btn-small", type: "submit" }, s ? "Save changes" : "Add session");
+  const form = h("form", { class: "form p-panel-form" },
+    field({ label: "Title", name: "title", required: true, value: s ? s.title : "Information session", wide: true }),
+    field({ label: "Date", name: "day", type: "date", required: true, value: start.day }),
+    h("div", { class: "p-pair" },
+      field({ label: "Starts", name: "start", type: "time", required: true, value: start.time }),
+      field({ label: "Ends", name: "end", type: "time", required: true, value: end.time })),
+    field({ label: "Place", name: "location", optional: true, value: s ? s.location : "", placeholder: "Harper Memorial Library, Room 130" }),
+    field({ label: "Meeting link", name: "meeting_url", type: "url", optional: true, value: s ? s.meeting_url || "" : "", placeholder: "https://", hint: "For online sessions. Shown only to people who register." }),
+    field({ label: "Seats", name: "capacity", type: "number", optional: true, value: s && s.capacity ? String(s.capacity) : "", hint: "Leave empty for no limit." }),
+    field({ label: "Cycle", name: "cycle_id", type: "select", options: live.map((c) => ({ value: c.id, label: c.name })), value: preset }),
+    field({ label: "Details", name: "details", type: "textarea", rows: 3, optional: true, value: s ? s.details : "", wide: true, placeholder: "What you'll cover, and anything to bring." }),
+    msg,
+    h("div", { class: "p-form-actions wide" }, submit, s ? textBtn("Cancel", close) : null));
+  form.elements.namedItem("cycle_id").options[0].textContent = "No particular cycle";
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (!form.checkValidity()) { form.reportValidity(); return; }
+    const d = formData(form);
+    if (!httpsOk(d.meeting_url)) { say(msg, "Meeting links need to start with https://", "bad"); return; }
+    if (d.end <= d.start) { say(msg, "The session has to end after it starts.", "bad"); return; }
+    const capacity = d.capacity ? Math.round(Number(d.capacity)) : null;
+    if (capacity !== null && !(capacity >= 1 && capacity <= 5000)) { say(msg, "Seats should be a number from 1 to 5,000, or empty.", "bad"); return; }
+    say(msg, "");
+    act(submit, "Saving…", async () => {
+      await db.saveSession({
+        title: d.title, starts_at: zonedISO(d.day, d.start), ends_at: zonedISO(d.day, d.end), location: d.location || "",
+        meeting_url: d.meeting_url || null, capacity, details: d.details || "", cycle_id: d.cycle_id || null,
+      }, s ? s.id : null);
+      await again();
+      toast(s ? "Session updated." : "Session added. It's on the Students page now.");
+    });
+  });
+  return form;
+}
+
+// ---- notify list
+
+function notifyTab(list) {
+  if (!list.length) {
+    return h("div", {},
+      h("p", { class: "p-lead" }, "While applications are closed, the Students page invites visitors to leave their email. They appear here."),
+      empty("No one is waiting right now."));
+  }
+  const emails = list.map((n) => n.email).join(", ");
+  const clear = h("button", { type: "button", class: "p-textbtn danger" }, "Clear the list");
+  clear.addEventListener("click", () => confirmInline(clear, {
+    text: `Remove all ${list.length} ${list.length === 1 ? "address" : "addresses"}? Do this after you have emailed them.`, yes: "Clear the list", danger: true,
+  }, async () => {
+    await db.deleteNotify(list.map((n) => n.id));
+    await again();
+    toast("The notify list is empty.");
+  }));
+  return h("div", {},
+    h("p", { class: "p-lead" }, "When a cycle opens, email everyone here (paste the addresses into BCC), then clear the list."),
+    h("div", { class: "p-form-actions p-toolbar" },
+      h("div", { class: "p-form-actions" },
+        h("button", { type: "button", class: "btn btn-small", onclick: () => copyList(emails, "Emails") }, "Copy emails"),
+        h("button", { type: "button", class: "btn btn-quiet btn-small", onclick: () => downloadFile(`foreman-notify-list-${todayISO()}.csv`, csv([["Name", "Email", "Joined"], ...list.map((n) => [n.name, n.email, dateTime(n.created_at)])])) }, "Download CSV")),
+      clear),
+    h("div", { class: "p-table-wrap" }, h("table", { class: "p-table" },
+      h("thead", {}, h("tr", {}, ["Name", "Email", "Joined", ""].map((c) => h("th", { scope: "col" }, c)))),
+      h("tbody", {}, list.map((n) => h("tr", {},
+        h("td", {}, n.name || "—"),
+        h("td", {}, n.email),
+        h("td", {}, date(n.created_at)),
+        h("td", { class: "p-td-actions" }, textBtn("Remove", (e) => confirmInline(e.currentTarget, { text: `Remove ${n.email}?`, yes: "Remove", danger: true }, async () => {
+          await db.deleteNotify([n.id]);
+          await again();
+          toast("Removed.");
+        }), "danger"))))))));
+}
+
+// ---------------------------------------------------------------- the team page
+
+function thumb(m, cls = "p-thumb") {
+  const box = h("span", { class: cls, "aria-hidden": "true" }, initialsOf(m.name));
+  const src = db.photoUrl(m.photo_path);
+  if (src) {
+    const img = h("img", { src, alt: "", loading: "lazy" });
+    img.addEventListener("load", () => box.classList.add("has-photo"));
+    img.addEventListener("error", () => img.remove());
+    box.append(img);
+  }
+  return box;
+}
+
+async function viewTeam(t) {
+  const [team, profiles] = await Promise.all([db.listTeam(), db.listProfiles()]);
+  const accounts = profiles.filter((p) => p.role !== "user" || team.some((m) => m.profile_id === p.id));
+  const editor = formPanel("Add a person", (m, close) => teamForm(m, team, accounts, close), (m) => `Edit ${m.name}`);
+  const who = (id) => profiles.find((p) => p.id === id);
+  screen(t, {
+    title: "Team page",
+    sub: "Everyone on the public team page, in the order shown. Link a card to a member's account and they can update their own photo, bio and coffee chat details.",
+    actions: h("a", { class: "link", href: "../team.html", target: "_blank", rel: "noopener" }, "View the team page", icon("external")),
+  },
+  editor.panel,
+  team.length ? h("div", { class: "p-table-wrap" }, h("table", { class: "p-table p-team" },
+    h("thead", {}, h("tr", {}, ["Person", "Teams", "Coffee chats", "Portal account", "Order", ""].map((c) => h("th", { scope: "col" }, c)))),
+    h("tbody", {}, team.map((m) => {
+      const account = m.profile_id ? who(m.profile_id) : null;
+      return h("tr", {},
+        h("td", {}, h("div", { class: "p-person-cell" }, thumb(m),
+          h("div", {}, h("span", { class: "p-strong" }, m.name), h("span", { class: "p-sub2" }, m.title || "No title"),
+            m.visible ? null : pill("Hidden", "muted")))),
+        h("td", {}, m.teams.length ? h("span", { class: "p-tags" }, m.teams.map((x) => h("span", { class: "p-tag" }, x))) : "—"),
+        h("td", {}, m.hosts_chats ? (m.booking_url ? "Booking link" : m.email ? "By email" : pill("No contact yet", "active")) : "—"),
+        h("td", {}, account ? h("span", {}, account.email) : h("span", { class: "p-sub2" }, "Not linked"),
+          m.runs_recruiting ? h("span", { class: "p-tags" }, h("span", { class: "p-tag p-tag-signal" }, "Runs recruiting")) : null),
+        h("td", {}, String(m.sort_order)),
+        h("td", { class: "p-td-actions" },
+          textBtn("Edit", () => editor.open(m)),
+          textBtn("Remove", (e) => confirmInline(e.currentTarget, { text: `Remove ${m.name} from the team page?`, yes: "Remove", danger: true }, async () => {
+            await db.deleteTeamMember(m);
+            await again();
+            toast(`${m.name} is off the team page.`);
+          }), "danger")));
+    })))) : empty("No one is on the team page yet. Add the first person above."));
+}
+
+function photoField(card, onPick) {
+  const preview = h("div", { class: "p-photo" }, thumb(card || { name: "" }, "p-thumb p-thumb-lg"));
+  const input = h("input", { type: "file", accept: "image/jpeg,image/png,image/webp" });
+  const note = h("p", { class: "p-hint" }, `A JPEG, PNG or WebP image, up to ${MAX_PHOTO_MB} MB. Portraits look best at 4:5.`);
+  input.addEventListener("change", () => {
+    const file = input.files[0];
+    if (!file) return;
+    if (!/^image\/(jpeg|png|webp)$/.test(file.type)) { note.textContent = "Please choose a JPEG, PNG or WebP image."; input.value = ""; return; }
+    if (file.size > MAX_PHOTO_MB * 1048576) { note.textContent = `That image is larger than ${MAX_PHOTO_MB} MB.`; input.value = ""; return; }
+    const url = URL.createObjectURL(file);
+    preview.replaceChildren(h("span", { class: "p-thumb p-thumb-lg has-photo" }, h("img", { src: url, alt: "" })));
+    note.textContent = `${file.name} will be uploaded when you save.`;
+    onPick(file);
+  });
+  return h("div", { class: "field wide p-photo-field" },
+    h("span", { class: "p-label" }, "Photo"),
+    h("div", { class: "p-photo-row" }, preview,
+      h("div", {}, h("label", { class: "btn btn-quiet btn-small p-upload" }, icon("upload"), h("span", {}, card && card.photo_path ? "Replace photo" : "Upload photo"), input), note)));
+}
+
+function teamForm(m, team, accounts, close) {
+  let photo = null;
+  const chosen = new Set(m ? m.teams : []);
+  const options = [...new Set([...TEAM_ORDER, ...team.flatMap((x) => x.teams)])];
+  const msg = h("p", { class: "p-form-msg", role: "status", hidden: true });
+  const submit = h("button", { class: "btn btn-small", type: "submit" }, m ? "Save changes" : "Add to the team page");
+  const form = h("form", { class: "form p-panel-form", novalidate: true },
+    field({ label: "Name", name: "name", required: true, value: m ? m.name : "", autocomplete: "off" }),
+    field({ label: "Title", name: "title", value: m ? m.title : "", placeholder: "Analyst", optional: true }),
+    h("fieldset", { class: "p-teams wide" }, h("legend", {}, "Teams"),
+      h("div", { class: "p-checks" }, options.map((name) => check({ name: `team:${name}`, label: name, checked: chosen.has(name) }))),
+      field({ label: "Another team", name: "team_other", optional: true, placeholder: "For example, Research" })),
+    field({ label: "Class year", name: "class_year", value: m ? m.class_year : "", placeholder: "Class of 2028", optional: true }),
+    field({ label: "Major", name: "major", value: m ? m.major : "", optional: true }),
+    field({ label: "Bio", name: "bio", type: "textarea", rows: 4, value: m ? m.bio : "", optional: true, wide: true, hint: "Two or three sentences. Up to 1,500 characters." }),
+    field({ label: "LinkedIn", name: "linkedin_url", type: "url", value: m ? m.linkedin_url || "" : "", optional: true, placeholder: "https://www.linkedin.com/in/…" }),
+    photoField(m, (file) => { photo = file; }),
+    h("fieldset", { class: "p-teams wide" }, h("legend", {}, "Coffee chats"),
+      check({ name: "hosts_chats", label: "Takes coffee chats", checked: m ? m.hosts_chats : false, hint: "Listed on the Students page with a booking button." }),
+      h("div", { class: "p-fs-grid p-fs-2" },
+        field({ label: "Booking link", name: "booking_url", type: "url", value: m ? m.booking_url || "" : "", optional: true, placeholder: "https://calendly.com/…", hint: "Calendly, Cal.com or a Google Calendar booking page." }),
+        field({ label: "Email for chats", name: "email", type: "email", value: m ? m.email : "", optional: true, hint: "Used when there is no booking link." }),
+        field({ label: "Happy to talk about", name: "chat_topics", value: m ? m.chat_topics : "", optional: true, placeholder: "Training and first engagements", wide: true }))),
+    h("fieldset", { class: "p-teams wide" }, h("legend", {}, "Portal"),
+      h("div", { class: "p-fs-grid p-fs-2" },
+        field({
+          label: "Linked account", name: "profile_id", type: "select", value: m ? m.profile_id || "" : "",
+          options: accounts.map((a) => ({ value: a.id, label: `${a.full_name || a.email} (${ROLE[a.role]})` })),
+          hint: "Lets them edit their own photo, bio and coffee chat details.",
+        }),
+        field({ label: "Order on the page", name: "sort_order", type: "number", value: String(m ? m.sort_order : 100), hint: "Lower numbers come first." })),
+      check({ name: "runs_recruiting", label: "Helps run recruiting", checked: m ? m.runs_recruiting : false, hint: "Info sessions, their sign-ups and the notify list. Needs a linked member account." }),
+      check({ name: "visible", label: "Show on the team page", checked: m ? m.visible : true })),
+    msg,
+    h("div", { class: "p-form-actions wide" }, submit, m ? textBtn("Cancel", close) : null));
+  form.elements.namedItem("profile_id").options[0].textContent = "Not linked";
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const d = formData(form);
+    const flag = (name) => form.elements.namedItem(name).checked;
+    const teams = options.filter((name) => form.elements.namedItem(`team:${name}`).checked);
+    if (d.team_other) d.team_other.split(",").map((x) => x.trim()).filter(Boolean).forEach((x) => { if (!teams.includes(x)) teams.push(x.slice(0, 40)); });
+    const problem = !d.name ? "Add a name." : !httpsOk(d.linkedin_url) ? "The LinkedIn link needs to start with https://"
+      : !httpsOk(d.booking_url) ? "The booking link needs to start with https://" : !emailOk(d.email) ? "Check the email address." : teams.length > 8 ? "Choose up to eight teams." : "";
+    if (problem) { say(msg, problem, "bad"); return; }
+    say(msg, "");
+    const row = {
+      name: d.name, title: d.title || "", teams, bio: (d.bio || "").slice(0, 1500), class_year: d.class_year || "", major: d.major || "",
+      linkedin_url: d.linkedin_url || null, booking_url: d.booking_url || null, email: d.email || "", chat_topics: d.chat_topics || "",
+      hosts_chats: flag("hosts_chats"), runs_recruiting: flag("runs_recruiting"), visible: flag("visible"),
+      profile_id: d.profile_id || null, sort_order: Number(d.sort_order) || 100,
+    };
+    act(submit, "Saving…", async () => {
+      let saved = await db.saveTeamMember(row, m ? m.id : null);
+      if (photo) {
+        const path = await db.uploadTeamPhoto(saved.id, photo, saved.photo_path);
+        saved = await db.saveTeamMember({ ...row, photo_path: path }, saved.id);
+      }
+      if (S.profile && saved.profile_id === S.profile.id) await refresh();
+      await again();
+      toast(m ? "Saved. The team page is up to date." : `${row.name} is on the team page.`);
+    });
+  });
+  return form;
+}
+
+async function viewProfile(t) {
+  const info = await db.recruiterInfo();
+  S.card = info.card;
+  S.recruiter = info.recruiter;
+  const m = info.card;
+  if (!m) {
+    return screen(t, { title: "Your team profile", sub: "You aren't on the team page yet. An administrator can add you and link the card to this account." },
+      h("div", { class: "actions" }, h("a", { class: "link", href: "../team.html", target: "_blank", rel: "noopener" }, "View the team page", icon("external"))));
+  }
+  let photo = null;
+  const msg = h("p", { class: "p-form-msg", role: "status", hidden: true });
+  const submit = h("button", { class: "btn btn-small", type: "submit" }, "Save my profile");
+  const form = h("form", { class: "form", novalidate: true },
+    field({ label: "Bio", name: "bio", type: "textarea", rows: 5, value: m.bio, wide: true, optional: true, hint: "Two or three sentences about you and your work at Foreman." }),
+    field({ label: "Class year", name: "class_year", value: m.class_year, placeholder: "Class of 2028", optional: true }),
+    field({ label: "Major", name: "major", value: m.major, optional: true }),
+    field({ label: "LinkedIn", name: "linkedin_url", type: "url", value: m.linkedin_url || "", optional: true, placeholder: "https://www.linkedin.com/in/…", wide: true }),
+    photoField(m, (file) => { photo = file; }),
+    h("fieldset", { class: "p-teams wide" }, h("legend", {}, "Coffee chats"),
+      check({ name: "hosts_chats", label: "I'm taking coffee chats", checked: m.hosts_chats, hint: "You appear on the Students page with a button to book time with you." }),
+      h("div", { class: "p-fs-grid p-fs-2" },
+        field({ label: "Booking link", name: "booking_url", type: "url", value: m.booking_url || "", optional: true, placeholder: "https://calendly.com/…", hint: "A free Calendly, Cal.com or Google Calendar booking page." }),
+        field({ label: "Email for chats", name: "email", type: "email", value: m.email, optional: true, hint: "Used when there is no booking link." }),
+        field({ label: "Happy to talk about", name: "chat_topics", value: m.chat_topics, optional: true, wide: true }))),
+    msg,
+    h("div", { class: "p-form-actions wide" }, submit));
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const d = formData(form);
+    const hosts = form.elements.namedItem("hosts_chats").checked;
+    const problem = !httpsOk(d.linkedin_url) ? "The LinkedIn link needs to start with https://" : !httpsOk(d.booking_url) ? "The booking link needs to start with https://"
+      : !emailOk(d.email) ? "Check the email address." : hosts && !d.booking_url && !d.email ? "Add a booking link or an email so students can reach you." : "";
+    if (problem) { say(msg, problem, "bad"); return; }
+    say(msg, "");
+    act(submit, "Saving…", async () => {
+      const changes = {
+        bio: (d.bio || "").slice(0, 1500), class_year: d.class_year || "", major: d.major || "", linkedin_url: d.linkedin_url || null,
+        booking_url: d.booking_url || null, email: d.email || "", chat_topics: d.chat_topics || "", hosts_chats: hosts,
+      };
+      if (photo) changes.photo_path = await db.uploadTeamPhoto(m.id, photo, m.photo_path);
+      await db.updateMyCard(m.id, changes);
+      await again();
+      toast("Saved. Your card on the team page is up to date.");
+    });
+  });
+  screen(t, { title: "Your team profile", sub: "How you appear on the public team page. An administrator sets your name, title and teams." },
+    h("div", { class: "p-cols" },
+      h("div", { class: "p-col-main" }, form),
+      h("aside", { class: "p-aside" },
+        h("section", { class: "p-card p-card-preview" },
+          thumb(m, "p-thumb p-thumb-card"),
+          h("h2", {}, m.name),
+          h("p", { class: "p-card-text" }, m.title || ""),
+          m.teams.length ? h("p", { class: "p-tags" }, m.teams.map((x) => h("span", { class: "p-tag" }, x))) : null,
+          m.visible ? null : h("p", { class: "p-hint" }, "Your card is hidden from the team page for now."),
+          h("div", { class: "actions" }, h("a", { class: "link", href: "../team.html", target: "_blank", rel: "noopener" }, "View the team page", icon("external")))))));
+}
+
 // ---------------------------------------------------------------- account
 
 function viewAccount(t) {
@@ -1965,7 +2579,9 @@ function viewAccount(t) {
 
   const access = {
     admin: "As an administrator you can see and manage everything in the portal.",
-    member: "As a member you can see your engagements, the library and announcements.",
+    member: S.recruiter
+      ? "As a member of the recruiting team you can see your engagements, the library, announcements, and run info sessions and the notify list."
+      : "As a member you can see your engagements, the library and announcements.",
   }[p.role] || (S.clientEngagements.length ? "As a client you can share records, read updates and download deliverables for your engagement." : "You can apply to join Foreman and follow your application here.");
   screen(t, { title: "Your account", sub: p.email },
     h("div", { class: "p-cols" },

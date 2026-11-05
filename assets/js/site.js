@@ -25,6 +25,9 @@ setUpOrg();
 setUpMagnetic();
 openDetailsFromHash();
 window.addEventListener("hashchange", openDetailsFromHash);
+// Recruiting dates, info sessions, coffee chats, the team page and the recruiting card are
+// read from the portal's database, so they load after the page itself.
+import("./recruiting.js").then((m) => m.startRecruiting()).catch(() => {});
 document.querySelectorAll("form.js-form").forEach(setUpForm);
 
 function setUpHeader() {

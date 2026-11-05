@@ -10,11 +10,13 @@
 // holds the signed-in person's own permissions.
 
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "../../config.js";
+import { zonedISO } from "./recruit-shared.js";
 
 export const MAX_FILE_MB = 50;
 export const MAX_RESUME_MB = 10;
 
 const LIVE = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
+export const MAX_PHOTO_MB = 5;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // ---------------------------------------------------------------- shared helpers
@@ -66,6 +68,33 @@ function pick(source, keys) {
 }
 
 const APPLICATION_FIELDS = ["full_name", "answers", "resume_path", "resume_name"];
+const CYCLE_FIELDS = ["name", "opens_at", "closes_at", "decisions_by", "note"];
+const SESSION_FIELDS = ["title", "starts_at", "ends_at", "location", "meeting_url", "capacity", "details", "cycle_id"];
+const TEAM_FIELDS = ["name", "title", "teams", "bio", "class_year", "major", "photo_path", "linkedin_url", "email", "booking_url",
+  "chat_topics", "hosts_chats", "runs_recruiting", "profile_id", "visible", "sort_order"];
+// What people may change on their own team card. The database enforces the same list.
+const OWN_CARD_FIELDS = ["bio", "class_year", "major", "photo_path", "linkedin_url", "email", "booking_url", "chat_topics", "hosts_chats"];
+const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+// Empty optional links and numbers are stored as nothing, not as empty text.
+function tidyRow(row) {
+  const out = { ...row };
+  for (const k of ["linkedin_url", "booking_url", "meeting_url", "photo_path", "decisions_by", "cycle_id", "profile_id"]) {
+    if (k in out && (out[k] === "" || out[k] === undefined)) out[k] = null;
+  }
+  if ("capacity" in out) out.capacity = out.capacity === "" || out.capacity == null ? null : Number(out.capacity);
+  if ("sort_order" in out) out.sort_order = Number(out.sort_order) || 100;
+  return out;
+}
+
+// The public key goes in the apikey header. Older projects' keys are tokens and may also be
+// sent as the bearer; the newer publishable keys must not be.
+const looksLikeToken = (key) => String(key).split(".").length === 3;
+function publicHeaders() {
+  const headers = { apikey: SUPABASE_ANON_KEY, "Content-Type": "application/json" };
+  if (looksLikeToken(SUPABASE_ANON_KEY)) headers.Authorization = `Bearer ${SUPABASE_ANON_KEY}`;
+  return headers;
+}
 const ENGAGEMENT_FIELDS = ["company", "title", "practice", "stage", "summary", "started_on", "target_on"];
 const PERSON_FIELDS = ["kind", "name", "email", "title", "user_id", "invite_code"];
 
@@ -163,6 +192,25 @@ function createLive() {
   async function removeFiles(bucket, paths) {
     const list = paths.filter(Boolean);
     if (list.length) await run((c) => c.storage.from(bucket).remove(list));
+  }
+
+  // The public recruiting calls are plain requests, so the website's pages never load the
+  // Supabase library just to show dates or take a registration.
+  async function rpcPublic(fn, args = {}) {
+    let res;
+    try {
+      res = await fetch(`${base}/rest/v1/rpc/${fn}`, { method: "POST", headers: publicHeaders(), body: JSON.stringify(args) });
+    } catch (err) {
+      throw friendly(err);
+    }
+    const text = await res.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (_) { data = null; }
+    if (!res.ok) throw friendly(data && data.message ? data : { message: `The request didn't go through (${res.status}).` });
+    return data;
+  }
+  async function myId() {
+    return (await me()).id;
   }
 
   return {
@@ -287,12 +335,7 @@ function createLive() {
       if (data["bot-field"]) return;
       const res = await fetch(`${base}/rest/v1/inquiries`, {
         method: "POST",
-        headers: {
-          apikey: SUPABASE_ANON_KEY,
-          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-          "Content-Type": "application/json",
-          Prefer: "return=minimal",
-        },
+        headers: { ...publicHeaders(), Prefer: "return=minimal" },
         body: JSON.stringify(cleanInquiry(data)),
       });
       if (!res.ok) throw new Error(`The inquiry was not saved (${res.status}).`);
@@ -421,6 +464,89 @@ function createLive() {
       await run((c) => c.from("announcements").delete().eq("id", id));
     },
 
+    // ---- recruiting: the public side
+    async recruitingPublic() {
+      return rpcPublic("recruiting_public");
+    },
+    async registerForSession(id, { name, email, year }) {
+      return rpcPublic("register_for_session", { p_session: id, p_name: name, p_email: email, p_year: year || "" });
+    },
+    async joinNotifyList({ email, name }) {
+      await rpcPublic("join_notify_list", { p_email: email, p_name: name || "" });
+    },
+    photoUrl(path) {
+      return path ? `${base}/storage/v1/object/public/team/${path.split("/").map(encodeURIComponent).join("/")}` : null;
+    },
+
+    // ---- recruiting: the portal side
+    async recruiterInfo() {
+      const id = await myId();
+      const [recruiter, card] = await Promise.all([
+        run((c) => c.rpc("is_recruiter")),
+        run((c) => c.from("team_members").select("*").eq("profile_id", id).maybeSingle()),
+      ]);
+      return { recruiter: Boolean(recruiter), card: card || null };
+    },
+    async listCycles() {
+      return run((c) => c.from("cycles").select("*").order("opens_at", { ascending: false }));
+    },
+    async saveCycle(fields, id) {
+      const row = tidyRow(pick(fields, CYCLE_FIELDS));
+      if (id) return run((c) => c.from("cycles").update(row).eq("id", id).select().single());
+      return run((c) => c.from("cycles").insert(row).select().single());
+    },
+    async deleteCycle(id) {
+      await run((c) => c.from("cycles").delete().eq("id", id));
+    },
+    async listSessions() {
+      const [sessions, regs] = await Promise.all([
+        run((c) => c.from("info_sessions").select("*").order("starts_at", { ascending: false })),
+        run((c) => c.from("session_registrations").select("session_id")),
+      ]);
+      return sessions.map((s) => ({ ...s, registered: regs.filter((r) => r.session_id === s.id).length }));
+    },
+    async saveSession(fields, id) {
+      const row = tidyRow(pick(fields, SESSION_FIELDS));
+      if (id) return run((c) => c.from("info_sessions").update(row).eq("id", id).select().single());
+      return run((c) => c.from("info_sessions").insert(row).select().single());
+    },
+    async deleteSession(id) {
+      await run((c) => c.from("info_sessions").delete().eq("id", id));
+    },
+    async listRegistrations(sessionId) {
+      return run((c) => c.from("session_registrations").select("*").eq("session_id", sessionId).order("created_at"));
+    },
+    async deleteRegistration(id) {
+      await run((c) => c.from("session_registrations").delete().eq("id", id));
+    },
+    async listNotify() {
+      return run((c) => c.from("notify_list").select("*").order("created_at", { ascending: false }));
+    },
+    async deleteNotify(ids) {
+      if (ids.length) await run((c) => c.from("notify_list").delete().in("id", ids));
+    },
+    async listTeam() {
+      return run((c) => c.from("team_members").select("*").order("sort_order").order("name"));
+    },
+    async saveTeamMember(fields, id) {
+      const row = tidyRow(pick(fields, TEAM_FIELDS));
+      if (id) return run((c) => c.from("team_members").update(row).eq("id", id).select().single());
+      return run((c) => c.from("team_members").insert(row).select().single());
+    },
+    async deleteTeamMember(row) {
+      await run((c) => c.from("team_members").delete().eq("id", row.id));
+      if (row.photo_path) await removeFiles("team", [row.photo_path]).catch(() => {});
+    },
+    async uploadTeamPhoto(cardId, file, previousPath) {
+      const path = `${cardId}/${Date.now()}-${safeName(file.name)}`;
+      await upload("team", path, file);
+      if (previousPath) removeFiles("team", [previousPath]).catch(() => {});
+      return path;
+    },
+    async updateMyCard(id, changes) {
+      return run((c) => c.from("team_members").update(tidyRow(pick(changes, OWN_CARD_FIELDS))).eq("id", id).select().single());
+    },
+
     async listProfiles() {
       return run((c) => c.from("profiles").select("*").order("created_at", { ascending: false }));
     },
@@ -432,7 +558,7 @@ function createLive() {
 
 // ---------------------------------------------------------------- demo: this browser only
 
-const DEMO_VERSION = 4;
+const DEMO_VERSION = 5;
 const DEMO_ACCOUNTS = [
   { key: "applicant", label: "Applicant", text: "A student with an application in draft" },
   { key: "member", label: "Member", text: "An analyst on a live engagement" },
@@ -470,6 +596,20 @@ function createDemo() {
   }
   const isAdmin = () => need().role === "admin";
   const isMember = () => ["member", "admin"].includes(need().role);
+  const myCard = () => state.team.find((m) => m.profile_id === state.session) || null;
+  const isRecruiter = () => isAdmin() || (isMember() && Boolean(myCard() && myCard().runs_recruiting));
+  const at = () => Date.now();
+  const openCycle = () => state.cycles
+    .filter((c) => new Date(c.opens_at) <= at() && new Date(c.closes_at) > at())
+    .sort((a, b) => String(a.closes_at).localeCompare(String(b.closes_at)))[0] || null;
+  const cycleAhead = () => state.cycles.some((c) => new Date(c.closes_at) > at());
+  const publicCycle = (c) => (c ? (({ note, created_at, ...rest }) => rest)(c) : null);
+  function overlapCheck(row, id) {
+    const a = new Date(row.opens_at), b = new Date(row.closes_at);
+    if (!(b > a)) throw new Error("A cycle has to close after it opens.");
+    const clash = state.cycles.find((c) => c.id !== id && new Date(c.opens_at) < b && new Date(c.closes_at) > a);
+    if (clash) throw new Error(`These dates overlap the ${clash.name} cycle. Cycles can't overlap.`);
+  }
   const links = () => state.people.filter((x) => x.user_id === state.session);
   const onEngagement = (id) => isAdmin() || links().some((l) => l.engagement_id === id);
   const onTeam = (id) => isAdmin() || links().some((l) => l.engagement_id === id && l.kind === "team");
@@ -565,10 +705,10 @@ function createDemo() {
       const fields = pick(changes, APPLICATION_FIELDS);
       const current = state.applications.find((a) => a.user_id === p.id);
       if (!current) {
-        allow(state.settings.applications_open !== "false");
+        if (!cycleAhead()) throw new Error("Applications are closed right now, and the next cycle hasn't been scheduled yet.");
         return add("applications", {
           user_id: p.id, status: "draft", full_name: "", email: p.email, answers: {}, resume_path: null, resume_name: null,
-          message: "", submitted_at: null, decided_at: null, updated_at: now(), ...fields,
+          message: "", submitted_at: null, decided_at: null, cycle_id: null, updated_at: now(), ...fields,
         });
       }
       allow(!id || current.id === id);
@@ -580,7 +720,9 @@ function createDemo() {
       const p = need();
       const a = state.applications.find((x) => x.id === id && x.user_id === p.id);
       allow(a && a.status === "draft");
-      return change("applications", id, { status: "submitted", submitted_at: now(), updated_at: now() });
+      const cycle = a.cycle_id || (openCycle() && openCycle().id);
+      if (!cycle) throw new Error("Applications are closed right now. You can submit once the next cycle opens.");
+      return change("applications", id, { status: "submitted", cycle_id: cycle, submitted_at: now(), updated_at: now() });
     },
     async uploadResume(file) {
       await pause(400);
@@ -733,6 +875,117 @@ function createDemo() {
     async postAnnouncement({ title, body }) { allow(isAdmin()); return add("announcements", { title, body, author_name: nameOf(need()) }); },
     async deleteAnnouncement(id) { allow(isAdmin()); drop("announcements", (x) => x.id === id); },
 
+    // ---- recruiting: the public side, read from this browser's sample records
+    async recruitingPublic() {
+      await pause(60);
+      const t = at();
+      const past = state.cycles.filter((c) => new Date(c.closes_at) <= t).sort((a, b) => String(b.closes_at).localeCompare(String(a.closes_at)));
+      const next = state.cycles.filter((c) => new Date(c.opens_at) > t).sort((a, b) => String(a.opens_at).localeCompare(String(b.opens_at)));
+      const sessions = state.sessions.filter((s) => new Date(s.ends_at) > t).sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at)))
+        .slice(0, 20)
+        .map(({ meeting_url, cycle_id, created_at, ...s }) => ({ ...s, online: Boolean(meeting_url), registered: state.registrations.filter((r) => r.session_id === s.id).length }));
+      const team = state.team.filter((m) => m.visible)
+        .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name))
+        .map((m) => ({
+          id: m.id, name: m.name, title: m.title, teams: m.teams, bio: m.bio, class_year: m.class_year, major: m.major,
+          photo_path: m.photo_path, linkedin_url: m.linkedin_url, hosts_chats: m.hosts_chats, sort_order: m.sort_order,
+          booking_url: m.hosts_chats ? m.booking_url : null, email: m.hosts_chats ? m.email || null : null, chat_topics: m.hosts_chats ? m.chat_topics : "",
+        }));
+      return copy({ now: new Date(t).toISOString(), cycle: publicCycle(openCycle()), next: publicCycle(next[0]), last: publicCycle(past[0]), sessions, team });
+    },
+    async registerForSession(id, { name, email, year }) {
+      await pause(300);
+      const clean = String(email || "").trim().toLowerCase();
+      if (!String(name || "").trim()) throw new Error("Please add your name.");
+      if (!EMAIL.test(clean)) throw new Error("Please check your email address.");
+      const s = state.sessions.find((x) => x.id === id);
+      if (!s) throw new Error("This session is no longer on the calendar.");
+      if (new Date(s.ends_at) <= at()) throw new Error("This session has already taken place.");
+      const already = state.registrations.some((r) => r.session_id === id && r.email === clean);
+      if (!already) {
+        if (s.capacity && state.registrations.filter((r) => r.session_id === id).length >= s.capacity) throw new Error("This session is full. Please choose another one.");
+        add("registrations", { session_id: id, name: String(name).trim().slice(0, 200), email: clean, year: String(year || "").slice(0, 40) });
+      }
+      const { cycle_id, created_at, capacity, ...out } = s;
+      return copy({ ...out, already });
+    },
+    async joinNotifyList({ email, name }) {
+      await pause(300);
+      const clean = String(email || "").trim().toLowerCase();
+      if (!EMAIL.test(clean)) throw new Error("Please check your email address.");
+      const row = state.notify.find((n) => n.email === clean);
+      if (row) { if (String(name || "").trim()) change("notify", row.id, { name: String(name).trim() }); return; }
+      add("notify", { email: clean, name: String(name || "").trim().slice(0, 200) });
+    },
+    photoUrl(path) {
+      return path ? blobs.get(path) || null : null;
+    },
+
+    // ---- recruiting: the portal side
+    async recruiterInfo() {
+      need();
+      return { recruiter: isRecruiter(), card: copy(myCard()) };
+    },
+    async listCycles() { allow(isRecruiter()); return copy([...state.cycles].sort((a, b) => String(b.opens_at).localeCompare(String(a.opens_at)))); },
+    async saveCycle(fields, id) {
+      allow(isAdmin());
+      const row = tidyRow(pick(fields, CYCLE_FIELDS));
+      overlapCheck({ ...(id ? state.cycles.find((c) => c.id === id) : {}), ...row }, id);
+      return id ? change("cycles", id, row) : add("cycles", { note: "", decisions_by: null, ...row });
+    },
+    async deleteCycle(id) {
+      allow(isAdmin());
+      drop("cycles", (c) => c.id === id);
+      state.applications.forEach((a) => { if (a.cycle_id === id) a.cycle_id = null; });
+      state.sessions.forEach((s) => { if (s.cycle_id === id) s.cycle_id = null; });
+      write();
+    },
+    async listSessions() {
+      allow(isRecruiter());
+      return copy(state.sessions.map((s) => ({ ...s, registered: state.registrations.filter((r) => r.session_id === s.id).length }))
+        .sort((a, b) => String(b.starts_at).localeCompare(String(a.starts_at))));
+    },
+    async saveSession(fields, id) {
+      allow(isRecruiter());
+      const row = tidyRow(pick(fields, SESSION_FIELDS));
+      const merged = { ...(id ? state.sessions.find((s) => s.id === id) : {}), ...row };
+      if (!(new Date(merged.ends_at) > new Date(merged.starts_at))) throw new Error("A session has to end after it starts.");
+      return id ? change("sessions", id, row) : add("sessions", { location: "", meeting_url: null, capacity: null, details: "", cycle_id: null, ...row });
+    },
+    async deleteSession(id) {
+      allow(isRecruiter());
+      drop("sessions", (s) => s.id === id);
+      drop("registrations", (r) => r.session_id === id);
+    },
+    async listRegistrations(sessionId) { allow(isRecruiter()); return copy(state.registrations.filter((r) => r.session_id === sessionId).sort(oldest)); },
+    async deleteRegistration(id) { allow(isRecruiter()); drop("registrations", (r) => r.id === id); },
+    async listNotify() { allow(isRecruiter()); return copy([...state.notify].sort(newest)); },
+    async deleteNotify(ids) { allow(isRecruiter()); drop("notify", (n) => ids.includes(n.id)); },
+    async listTeam() {
+      allow(isRecruiter());
+      return copy([...state.team].sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name)));
+    },
+    async saveTeamMember(fields, id) {
+      allow(isAdmin());
+      const row = tidyRow(pick(fields, TEAM_FIELDS));
+      if (row.profile_id && state.team.some((m) => m.profile_id === row.profile_id && m.id !== id)) throw new Error("That account is already linked to another card.");
+      const base = { title: "", teams: [], bio: "", class_year: "", major: "", photo_path: null, linkedin_url: null, email: "", booking_url: null,
+        chat_topics: "", hosts_chats: false, runs_recruiting: false, profile_id: null, visible: true, sort_order: 100 };
+      return id ? change("team", id, { ...row, updated_at: now() }) : add("team", { ...base, ...row, updated_at: now() });
+    },
+    async deleteTeamMember(row) { allow(isAdmin()); drop("team", (m) => m.id === row.id); },
+    async uploadTeamPhoto(cardId, file) {
+      await pause(400);
+      const card = state.team.find((m) => m.id === cardId);
+      allow(card && (isAdmin() || card.profile_id === state.session));
+      return keep(cardId, file);
+    },
+    async updateMyCard(id, changes) {
+      const card = state.team.find((m) => m.id === id);
+      allow(card && (isAdmin() || card.profile_id === state.session));
+      return change("team", id, { ...tidyRow(pick(changes, OWN_CARD_FIELDS)), updated_at: now() });
+    },
+
     async listProfiles() { allow(isAdmin()); return copy(state.profiles.map(bare).sort(newest)); },
     async setRole(id, role) {
       allow(isAdmin());
@@ -770,9 +1023,28 @@ function seed() {
       id, user_id: user, status, full_name: p.full_name, email: p.email, answers,
       resume_path: status === "draft" ? null : `${user}/resume.pdf`, resume_name: status === "draft" ? null : `${p.full_name.replace(" ", "-")}-Resume.pdf`,
       message: "", submitted_at: status === "draft" ? null : at(days), decided_at: null,
+      cycle_id: status === "draft" ? null : "demo-cyc-winter",
       created_at: at(days + 2), updated_at: at(Math.max(0, days - 1)), ...extra,
     };
   };
+  // Chicago days and times, relative to today, for the sample recruiting calendar.
+  const chicago = (offset, clock) => zonedISO(day(offset), clock);
+  // Sample cycles are named for the academic quarter they fall in: Autumn, Winter, Spring.
+  const quarter = (shift) => {
+    const d = new Date(now);
+    let q = d.getMonth() <= 2 ? 0 : d.getMonth() <= 5 ? 1 : 2;
+    let y = d.getFullYear();
+    q += shift;
+    while (q < 0) { q += 3; y -= 1; }
+    while (q > 2) { q -= 3; y += 1; }
+    return `${["Winter", "Spring", "Autumn"][q]} ${y}`;
+  };
+  const cycles = [
+    { id: "demo-cyc-past", name: quarter(-1), opens_at: chicago(-205, "09:00"), closes_at: chicago(-184, "23:59"), decisions_by: day(-170), note: "", created_at: at(220) },
+    { id: "demo-cyc-winter", name: quarter(0), opens_at: chicago(-18, "09:00"), closes_at: chicago(9, "23:59"), decisions_by: day(23), note: "Posters up in Harper, Reg and the Booth atrium.", created_at: at(30) },
+    { id: "demo-cyc-next", name: quarter(1), opens_at: chicago(70, "09:00"), closes_at: chicago(84, "23:59"), decisions_by: day(98), note: "", created_at: at(5) },
+  ];
+
   const applications = [
     application("demo-app-jordan", "demo-applicant", "draft", {
       year: "Second-year", major: "Economics", graduation: "June 2029",
@@ -874,11 +1146,70 @@ function seed() {
     { id: "demo-inq-3", kind: "consultation", name: "Grace Liu", email: "grace@liufamilyfoods.example", company: "Liu Family Foods", phone: "", sector: "Distribution", employees: "25 to 49", interest: "Operations improvement", role: "Owner", message: "We distribute to about 300 restaurants. Sales are up but cash is always tight, and I can't tell which accounts are worth it.", status: "contacted", engagement_id: null, created_at: at(6) },
   ];
 
+  const sessions = [
+    { id: "demo-ses-past", title: "Information session", starts_at: chicago(-12, "18:00"), ends_at: chicago(-12, "19:00"), location: "Harper Memorial Library, Room 130", meeting_url: null, capacity: 60, details: "", cycle_id: "demo-cyc-winter", created_at: at(25) },
+    { id: "demo-ses-1", title: "Information session", starts_at: chicago(2, "18:00"), ends_at: chicago(2, "19:00"), location: "Harper Memorial Library, Room 130", meeting_url: null, capacity: 60,
+      details: "How engagements work, what training covers and how to apply. Pizza after.", cycle_id: "demo-cyc-winter", created_at: at(20) },
+    { id: "demo-ses-2", title: "Online information session", starts_at: chicago(5, "12:30"), ends_at: chicago(5, "13:15"), location: "", meeting_url: "https://zoom.us/j/0000000000", capacity: null,
+      details: "A shorter session over lunch, with time for questions. The link arrives when you register.", cycle_id: "demo-cyc-winter", created_at: at(20) },
+    { id: "demo-ses-3", title: "Case practice for applicants", starts_at: chicago(11, "17:30"), ends_at: chicago(11, "19:00"), location: "Saieh Hall, Room 021", meeting_url: null, capacity: 30,
+      details: "Work through a short case on a small distributor with current members. For students invited to interview.", cycle_id: "demo-cyc-winter", created_at: at(18) },
+  ];
+  const registration = (id, session_id, name, email, year, days) => ({ id, session_id, name, email, year, created_at: at(days) });
+  const registrations = [
+    registration("demo-reg-1", "demo-ses-past", "Ava Lindqvist", "ava.lindqvist@example.edu", "First-year", 14),
+    registration("demo-reg-2", "demo-ses-past", "Mateo Rossi", "mateo.rossi@example.edu", "Second-year", 13),
+    registration("demo-reg-3", "demo-ses-1", "Isaac Mensah", "isaac.mensah@example.edu", "First-year", 3),
+    registration("demo-reg-4", "demo-ses-1", "Chloe Park", "chloe.park@example.edu", "Second-year", 2),
+    registration("demo-reg-5", "demo-ses-1", "Ruth Adler", "ruth.adler@example.edu", "Third-year", 1),
+    registration("demo-reg-6", "demo-ses-2", "Omar Haddad", "omar.haddad@example.edu", "First-year", 1),
+  ];
+  const notify = [
+    { id: "demo-ntf-1", email: "nina.brooks@example.edu", name: "Nina Brooks", created_at: at(40) },
+    { id: "demo-ntf-2", email: "theo.grant@example.edu", name: "Theo Grant", created_at: at(33) },
+    { id: "demo-ntf-3", email: "maya.cohen@example.edu", name: "", created_at: at(27) },
+  ];
+  const member = (id, name, title, teams, sort_order, extra = {}) => ({
+    id, name, title, teams, sort_order, bio: "", class_year: "", major: "", photo_path: null, linkedin_url: null, email: "", booking_url: null,
+    chat_topics: "", hosts_chats: false, runs_recruiting: false, profile_id: null, visible: true, created_at: at(200), updated_at: at(10), ...extra,
+  });
+  const team = [
+    member("demo-tm-avery", "Avery Chen", "President", ["Leadership"], 1, {
+      class_year: "Class of 2027", major: "Economics", profile_id: "demo-admin", runs_recruiting: true, linkedin_url: "https://www.linkedin.com/in/example",
+      bio: "Avery leads Foreman's training program and reviews every engagement before it reaches an owner. Before Foreman, Avery spent a summer in the finance office of a family-owned manufacturer.",
+    }),
+    member("demo-tm-marcus", "Marcus Webb", "Vice President, Engagements", ["Leadership", "Engagement managers"], 2, {
+      class_year: "Class of 2027", major: "Statistics", profile_id: "demo-marcus",
+      bio: "Marcus staffs each engagement and manages the Calder Industrial Supply review. He is most interested in how small distributors price their work.",
+    }),
+    member("demo-tm-priya", "Priya Raman", "Director of Recruiting", ["Marketing"], 3, {
+      class_year: "Class of 2028", major: "Economics", profile_id: "demo-member", hosts_chats: true, runs_recruiting: true,
+      email: "priya.raman@example.edu", booking_url: "https://calendly.com/example-foreman/coffee-chat", chat_topics: "Training, first engagements and the application",
+      bio: "Priya runs info sessions and coffee chats, and is an analyst on the Kestrel Mechanical engagement.",
+    }),
+    member("demo-tm-elena", "Elena Sorensen", "Engagement manager", ["Engagement managers"], 4, {
+      class_year: "Class of 2028", major: "Public Policy",
+      bio: "Elena works on operations engagements, with a focus on working capital and the cash cycle.",
+    }),
+    member("demo-tm-daniel", "Daniel Okoro", "Marketing associate", ["Marketing"], 5, {
+      class_year: "Class of 2029", major: "Economics", hosts_chats: true, email: "daniel.okoro@example.edu", chat_topics: "Joining as a first-year",
+      bio: "Daniel joined Foreman in his first quarter and helps run recruiting events on campus.",
+    }),
+    member("demo-tm-hannah", "Hannah Brooks", "Analyst", ["Analysts", "Marketing"], 6, {
+      class_year: "Class of 2028", major: "Mathematics", hosts_chats: true, booking_url: "https://cal.com/example-foreman/chat", chat_topics: "Case interviews and the analyst role",
+      bio: "Hannah builds the earnings and financing models on succession engagements.",
+    }),
+    member("demo-tm-sofia", "Sofia Martinez", "Analyst", ["Analysts"], 7, { class_year: "Class of 2029", major: "Data Science" }),
+    member("demo-tm-jonah", "Jonah Feld", "Analyst", ["Analysts"], 8, { class_year: "Class of 2028", major: "History" }),
+    member("demo-tm-alumni", "Former member", "Alumni adviser", ["Advisers"], 50, { visible: false }),
+  ];
+
   return {
     version: DEMO_VERSION,
     session: null,
     settings: { applications_open: "true" },
     profiles, applications, reviews, inquiries, engagements, people, documents, updates, resources, announcements,
+    cycles, sessions, registrations, notify, team,
   };
 }
 
