@@ -299,6 +299,7 @@ function renderNav() {
     items.push("sep");
     item("library", "Library");
     item("announcements", "Announcements");
+    item("profile", "Your team profile");
   } else if (p.role === "member") {
     item("home", "Home");
     item("engagements", "Engagements");
