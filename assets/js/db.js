@@ -546,6 +546,17 @@ function createLive() {
     async updateMyCard(id, changes) {
       return run((c) => c.from("team_members").update(tidyRow(pick(changes, OWN_CARD_FIELDS))).eq("id", id).select().single());
     },
+    // Administrators only (the database enforces it). An account has at most one card, so free
+    // its current card first, then link the chosen one. A null card just unlinks the account.
+    async linkTeamCard(profileId, cardId) {
+      await run((c) => {
+        let q = c.from("team_members").update({ profile_id: null }).eq("profile_id", profileId);
+        if (cardId) q = q.neq("id", cardId);
+        return q;
+      });
+      if (!cardId) return null;
+      return run((c) => c.from("team_members").update({ profile_id: profileId }).eq("id", cardId).select().single());
+    },
 
     async listProfiles() {
       return run((c) => c.from("profiles").select("*").order("created_at", { ascending: false }));
@@ -984,6 +995,12 @@ function createDemo() {
       const card = state.team.find((m) => m.id === id);
       allow(card && (isAdmin() || card.profile_id === state.session));
       return change("team", id, { ...tidyRow(pick(changes, OWN_CARD_FIELDS)), updated_at: now() });
+    },
+    async linkTeamCard(profileId, cardId) {
+      allow(isAdmin());
+      state.team.forEach((m) => { if (m.profile_id === profileId && m.id !== cardId) m.profile_id = null; });
+      if (!cardId) { write(); return null; }
+      return change("team", cardId, { profile_id: profileId, updated_at: now() });
     },
 
     async listProfiles() { allow(isAdmin()); return copy(state.profiles.map(bare).sort(newest)); },

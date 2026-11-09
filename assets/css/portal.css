@@ -847,6 +847,8 @@ a.p-strong:hover { text-decoration: underline; text-underline-offset: 0.22em; }
 .p-td-stage { min-width: 180px; }
 .p-td-stage .p-sub2 { margin-top: 8px; }
 .p-table .p-select { min-height: 36px; }
+.p-table .p-select-card { width: 13rem; max-width: 100%; }
+.p-td-date { white-space: nowrap; }
 @media (max-width: 719px) { .p-table { min-width: 640px; } }
 
 /* Inquiries */

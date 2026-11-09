@@ -303,9 +303,9 @@ function renderNav() {
     item("home", "Home");
     item("engagements", "Engagements");
     item("library", "Library");
-    if (S.recruiter || S.card) items.push("sep");
+    items.push("sep");
     if (S.recruiter) item("recruiting", "Recruiting");
-    if (S.card) item("profile", "Your team profile");
+    item("profile", "Your team profile");
   } else {
     item("home", "Home");
     for (const e of S.clientEngagements) item(`engagement-${e.id}`, e.company);
@@ -1874,7 +1874,7 @@ function inquiryItem(i) {
 }
 
 async function viewPeople(t) {
-  const [profiles, engagements, applications] = await Promise.all([db.listProfiles(), db.listEngagements(), db.listApplications()]);
+  const [profiles, engagements, applications, team] = await Promise.all([db.listProfiles(), db.listEngagements(), db.listApplications(), db.listTeam()]);
   const applicants = new Set(applications.map((a) => a.user_id));
   const clients = new Set(engagements.flatMap((e) => (e.people || []).filter((p) => p.kind === "client" && p.user_id).map((p) => p.user_id)));
   const groups = [["all", "Everyone"], ["admin", "Administrators"], ["member", "Members"], ["user", "Accounts"]];
@@ -1885,19 +1885,48 @@ async function viewPeople(t) {
     const q = query.toLowerCase();
     const rows = profiles.filter((p) => (S.peopleFilter === "all" || p.role === S.peopleFilter)
       && (!q || `${p.full_name} ${p.email}`.toLowerCase().includes(q)));
-    slot.replaceChildren(rows.length ? peopleTable(rows, applicants, clients) : empty("No one matches."));
+    slot.replaceChildren(rows.length ? peopleTable(rows, { applicants, clients, team, profiles, redraw: draw }) : empty("No one matches."));
   };
   const search = h("input", { type: "search", class: "p-search", placeholder: "Search by name or email", "aria-label": "Search people" });
   search.addEventListener("input", () => { query = search.value.trim(); draw(); });
   draw();
-  screen(t, { title: "People", sub: "Everyone with a portal account. Members and administrators are set here; clients join through their invitation." },
+  screen(t, { title: "People", sub: "Everyone with a portal account. Members and administrators are set here; clients join through their invitation. Link a member to their team card and they can update their own photo and bio." },
     h("div", { class: "p-toolbar" }, filterBar(groups, counts, S.peopleFilter, (k) => { S.peopleFilter = k; draw(); }, "Filter people"), search),
     slot);
 }
 
-function peopleTable(rows, applicants, clients) {
+// One team card per account. Linking lets the person edit their own photo, bio and coffee chat details.
+function teamCardSelect(p, { team, profiles, redraw }) {
+  const label = p.full_name || p.email;
+  const current = team.find((m) => m.profile_id === p.id) || null;
+  if (p.role === "user" && !current) return h("span", { class: "p-sub2" }, "Members only");
+  const owner = (m) => profiles.find((x) => x.id === m.profile_id);
+  const select = h("select", { class: "p-select p-select-card", "aria-label": `Team card for ${label}` },
+    h("option", { value: "", selected: !current }, "Not linked"),
+    team.map((m) => {
+      const other = m.profile_id && m.profile_id !== p.id ? owner(m) : null;
+      return h("option", { value: m.id, selected: Boolean(current && current.id === m.id) },
+        other ? `${m.name} (linked to ${other.full_name || other.email})` : m.name);
+    }));
+  select.addEventListener("change", async () => {
+    const card = team.find((m) => m.id === select.value) || null;
+    try {
+      await db.linkTeamCard(p.id, card ? card.id : null);
+      for (const m of team) if (m.profile_id === p.id) m.profile_id = null;
+      if (card) card.profile_id = p.id;
+      toast(card ? `Linked. ${label} can now update this card under Your team profile.` : `${label} is no longer linked to a team card.`);
+    } catch (err) {
+      toast(err.message, "bad");
+    }
+    redraw();
+  });
+  return select;
+}
+
+function peopleTable(rows, ctx) {
+  const { applicants, clients } = ctx;
   return h("div", { class: "p-table-wrap" }, h("table", { class: "p-table" },
-    h("thead", {}, h("tr", {}, ["Name", "Email", "Access", "Joined"].map((c) => h("th", { scope: "col" }, c)))),
+    h("thead", {}, h("tr", {}, ["Name", "Email", "Access", "Team card", "Joined"].map((c) => h("th", { scope: "col" }, c)))),
     h("tbody", {}, rows.map((p) => {
       const self = p.id === S.profile.id;
       const select = h("select", { class: "p-select", "aria-label": `Access for ${p.full_name || p.email}`, disabled: self, title: self ? "You can't change your own access." : null },
@@ -1918,7 +1947,8 @@ function peopleTable(rows, applicants, clients) {
         h("td", {}, h("span", { class: "p-strong" }, p.full_name || "No name yet"), tags.length ? h("span", { class: "p-sub2" }, tags.join(" · ")) : null),
         h("td", {}, p.email),
         h("td", {}, select),
-        h("td", {}, date(p.created_at)));
+        h("td", {}, teamCardSelect(p, ctx)),
+        h("td", { class: "p-td-date" }, date(p.created_at)));
     }))));
 }
 
@@ -2481,7 +2511,7 @@ async function viewProfile(t) {
   S.recruiter = info.recruiter;
   const m = info.card;
   if (!m) {
-    return screen(t, { title: "Your team profile", sub: "You aren't on the team page yet. An administrator can add you and link the card to this account." },
+    return screen(t, { title: "Your team profile", sub: "Your account isn't linked to a card on the team page yet. Ask an administrator to link it under People. Then you can update your photo, bio and coffee chat details here." },
       h("div", { class: "actions" }, h("a", { class: "link", href: "../team.html", target: "_blank", rel: "noopener" }, "View the team page", icon("external"))));
   }
   let photo = null;
