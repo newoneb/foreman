@@ -36,9 +36,10 @@
     X-Frame-Options = "DENY"
     Referrer-Policy = "strict-origin-when-cross-origin"
     Permissions-Policy = "camera=(), microphone=(), geolocation=(), payment=()"
-    # The portal talks to Supabase. If you add analytics, embeds or a custom Supabase domain,
-    # allow those addresses here as well, or the browser will block them.
-    Content-Security-Policy = "default-src 'self'; img-src 'self' data: blob: https://*.supabase.co; style-src 'self'; script-src 'self'; font-src 'self'; connect-src 'self' https://*.supabase.co wss://*.supabase.co; form-action 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'"
+    # The portal talks to Supabase, and the public pages load Google Analytics (assets/js/analytics.js).
+    # If you add embeds, other analytics or a custom Supabase domain, allow those addresses here as well,
+    # or the browser will block them.
+    Content-Security-Policy = "default-src 'self'; img-src 'self' data: blob: https://*.supabase.co https://*.google-analytics.com https://*.googletagmanager.com; style-src 'self'; script-src 'self' https://*.googletagmanager.com; font-src 'self'; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://*.google-analytics.com https://*.analytics.google.com https://*.googletagmanager.com; form-action 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'"
 
 [[headers]]
   for = "/portal/*"
