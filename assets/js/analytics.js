@@ -2,7 +2,7 @@
 // It is not included in the portal, so nothing from client, member or applicant pages is sent.
 // To change the property, replace the Measurement ID below.
 (function () {
-  var MEASUREMENT_ID = "G-S8YLE2RSHL";
+  var MEASUREMENT_ID = "G-HNN6FGZ0EP"";
 
   // Respect the browser's Global Privacy Control signal.
   if (navigator.globalPrivacyControl === true) return;
