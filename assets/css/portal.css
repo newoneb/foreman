@@ -1044,3 +1044,21 @@ a.p-strong:hover { text-decoration: underline; text-underline-offset: 0.22em; }
 .p-team td { vertical-align: middle; }
 .p-card-preview h2 { margin-top: 4px; }
 .p-filter-slot + * { margin-top: 28px; }
+
+/* Info session check-in */
+.p-session-toggles { display: contents; }
+.p-checkin { display: grid; gap: 24px; align-items: start; }
+@media (min-width: 720px) { .p-checkin { grid-template-columns: 220px minmax(0, 1fr); gap: 32px; } }
+.p-checkin-qr { width: 220px; max-width: 100%; padding: 12px; background: #fff; border: 1px solid var(--line); }
+.p-checkin-qr svg { display: block; width: 100%; height: auto; }
+.p-checkin-side { display: grid; gap: 14px; min-width: 0; }
+.p-checkin-side > .p-textbtn { justify-self: start; }
+.p-checkin-url { width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line-2, var(--line)); background: var(--bg); color: var(--ink); font: 400 0.8125rem/1.4 var(--mono); }
+.p-qrfull { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 32px; background: #fff; color: #0A1428; }
+.p-qrfull-inner { display: grid; justify-items: center; gap: 18px; text-align: center; }
+.p-qrfull-kicker { font: 400 1rem/1.4 var(--sans); color: #465068; }
+.p-qrfull h2 { font-family: var(--serif); font-size: clamp(2rem, 5vw, 3.5rem); font-weight: 400; line-height: 1.05; }
+.p-qrfull-code { width: min(62vh, 80vw); }
+.p-qrfull-code svg { display: block; width: 100%; height: auto; }
+.p-qrfull-when { font: 400 1rem/1.4 var(--sans); color: #465068; }
+.p-qrfull-close { position: absolute; top: 20px; right: 24px; }

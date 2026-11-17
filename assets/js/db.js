@@ -471,6 +471,9 @@ function createLive() {
     async registerForSession(id, { name, email, year }) {
       return rpcPublic("register_for_session", { p_session: id, p_name: name, p_email: email, p_year: year || "" });
     },
+    async checkIn(token, { name, email, year }) {
+      return rpcPublic("check_in_to_session", { p_token: token, p_name: name, p_email: email, p_year: year || "" });
+    },
     async joinNotifyList({ email, name }) {
       await rpcPublic("join_notify_list", { p_email: email, p_name: name || "" });
     },
@@ -499,11 +502,17 @@ function createLive() {
       await run((c) => c.from("cycles").delete().eq("id", id));
     },
     async listSessions() {
-      const [sessions, regs] = await Promise.all([
+      const [sessions, regs, seen] = await Promise.all([
         run((c) => c.from("info_sessions").select("*").order("starts_at", { ascending: false })),
         run((c) => c.from("session_registrations").select("session_id")),
+        // Until schema.sql has been run again, there is no attendance table; carry on without it.
+        run((c) => c.from("session_attendance").select("session_id")).catch(() => []),
       ]);
-      return sessions.map((s) => ({ ...s, registered: regs.filter((r) => r.session_id === s.id).length }));
+      return sessions.map((s) => ({
+        ...s,
+        registered: regs.filter((r) => r.session_id === s.id).length,
+        attended: seen.filter((r) => r.session_id === s.id).length,
+      }));
     },
     async saveSession(fields, id) {
       const row = tidyRow(pick(fields, SESSION_FIELDS));
@@ -515,6 +524,16 @@ function createLive() {
     },
     async listRegistrations(sessionId) {
       return run((c) => c.from("session_registrations").select("*").eq("session_id", sessionId).order("created_at"));
+    },
+    async listAttendance(sessionId) {
+      return run((c) => c.from("session_attendance").select("*").eq("session_id", sessionId).order("created_at"));
+    },
+    async deleteAttendance(id) {
+      await run((c) => c.from("session_attendance").delete().eq("id", id));
+    },
+    // Administrators only. Returns the session's private check-in token; renew replaces it.
+    async checkinToken(sessionId, renew = false) {
+      return run((c) => c.rpc("session_checkin_token", { p_session: sessionId, p_new: renew }));
     },
     async deleteRegistration(id) {
       await run((c) => c.from("session_registrations").delete().eq("id", id));
@@ -581,6 +600,8 @@ function createDemo() {
   const KEY = "foreman-portal-demo";
   const blobs = new Map(); // files added during this visit, by path
   let state = read() || seed();
+  state.attendance = state.attendance || [];
+  state.checkinLinks = state.checkinLinks || [];
   write();
 
   function read() {
@@ -920,6 +941,20 @@ function createDemo() {
       const { cycle_id, created_at, capacity, ...out } = s;
       return copy({ ...out, already });
     },
+    async checkIn(token, { name, email, year }) {
+      await pause(300);
+      const link = state.checkinLinks.find((l) => l.token === String(token || ""));
+      const s = link && state.sessions.find((x) => x.id === link.session_id);
+      if (!s) throw new Error("This check-in link isn't valid. Scan the QR code shown at the session.");
+      const t = at();
+      if (t < new Date(s.starts_at).getTime() - 2 * 36e5 || t > new Date(s.ends_at).getTime() + 4 * 36e5) throw new Error("Check-in for this session is closed.");
+      const clean = String(email || "").trim().toLowerCase();
+      if (!String(name || "").trim()) throw new Error("Please add your name.");
+      if (!EMAIL.test(clean)) throw new Error("Please check your email address.");
+      const already = state.attendance.some((r) => r.session_id === s.id && r.email === clean);
+      if (!already) add("attendance", { session_id: s.id, name: String(name).trim().slice(0, 200), email: clean, year: String(year || "").slice(0, 40) });
+      return copy({ title: s.title, starts_at: s.starts_at, ends_at: s.ends_at, already });
+    },
     async joinNotifyList({ email, name }) {
       await pause(300);
       const clean = String(email || "").trim().toLowerCase();
@@ -953,7 +988,7 @@ function createDemo() {
     },
     async listSessions() {
       allow(isRecruiter());
-      return copy(state.sessions.map((s) => ({ ...s, registered: state.registrations.filter((r) => r.session_id === s.id).length }))
+      return copy(state.sessions.map((s) => ({ ...s, registered: state.registrations.filter((r) => r.session_id === s.id).length, attended: state.attendance.filter((r) => r.session_id === s.id).length }))
         .sort((a, b) => String(b.starts_at).localeCompare(String(a.starts_at))));
     },
     async saveSession(fields, id) {
@@ -969,6 +1004,21 @@ function createDemo() {
       drop("registrations", (r) => r.session_id === id);
     },
     async listRegistrations(sessionId) { allow(isRecruiter()); return copy(state.registrations.filter((r) => r.session_id === sessionId).sort(oldest)); },
+    async listAttendance(sessionId) { allow(isRecruiter()); return copy(state.attendance.filter((r) => r.session_id === sessionId).sort(oldest)); },
+    async deleteAttendance(id) { allow(isRecruiter()); drop("attendance", (r) => r.id === id); },
+    async checkinToken(sessionId, renew = false) {
+      if (!isAdmin()) throw new Error("Only administrators can see check-in links.");
+      if (!state.sessions.some((x) => x.id === sessionId)) throw new Error("This session is no longer on the calendar.");
+      if (renew) state.checkinLinks = state.checkinLinks.filter((l) => l.session_id !== sessionId);
+      let link = state.checkinLinks.find((l) => l.session_id === sessionId);
+      if (!link) {
+        const bytes = crypto.getRandomValues(new Uint8Array(32));
+        link = { session_id: sessionId, token: Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("") };
+        state.checkinLinks.push(link);
+        write();
+      }
+      return link.token;
+    },
     async deleteRegistration(id) { allow(isRecruiter()); drop("registrations", (r) => r.id === id); },
     async listNotify() { allow(isRecruiter()); return copy([...state.notify].sort(newest)); },
     async deleteNotify(ids) { allow(isRecruiter()); drop("notify", (n) => ids.includes(n.id)); },
@@ -1227,6 +1277,11 @@ function seed() {
     settings: { applications_open: "true" },
     profiles, applications, reviews, inquiries, engagements, people, documents, updates, resources, announcements,
     cycles, sessions, registrations, notify, team,
+    attendance: [
+      { id: "demo-att-1", session_id: "demo-ses-past", name: "Ava Lindqvist", email: "ava.lindqvist@example.edu", year: "First-year", created_at: at(12, -0.2) },
+      { id: "demo-att-2", session_id: "demo-ses-past", name: "Leo Grant", email: "leo.grant@example.edu", year: "Second-year", created_at: at(12, -0.25) },
+    ],
+    checkinLinks: [],
   };
 }
 

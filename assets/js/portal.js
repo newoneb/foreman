@@ -9,6 +9,7 @@ import {
   zonedISO, zonedParts, todayISO, recruitingPhase, closesLabel, dayLong, dayShort, timeOf, timeRange, calendarDay, monthOf, dateOf,
   daysUntil, initialsOf, TEAM_ORDER,
 } from "./recruit-shared.js";
+import qrcode from "./vendor/qrcode.js";
 
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 const main = document.getElementById("portal-main");
@@ -2112,7 +2113,7 @@ async function viewRecruiting(t, tab = "") {
   const tabs = [["", "Cycles"], ["sessions", "Info sessions"], ["notify", "Notify list"]];
   const which = tabs.some(([k]) => k === tab) ? tab : "";
   const stat = (n, label, href) => h(href ? "a" : "div", { class: "p-stat", href }, h("b", { "data-count": String(n) }, String(n)), h("span", {}, label));
-  const body = which === "sessions" ? sessionsTab(upcoming, past, cycles, state)
+  const body = which === "sessions" ? sessionsTab(upcoming, past, cycles, state, admin)
     : which === "notify" ? notifyTab(notify)
       : cyclesTab(cycles, applications, admin);
   screen(t, {
@@ -2223,42 +2224,60 @@ function cycleForm(c, close) {
 
 // ---- info sessions
 
-function sessionsTab(upcoming, past, cycles, state) {
+function sessionsTab(upcoming, past, cycles, state, admin) {
   const editor = formPanel("Add an info session", (s, close) => sessionForm(s, cycles, state, close), (s) => `Edit ${s.title}`);
   return h("div", {},
     h("p", { class: "p-lead" }, "Sessions appear on the Students page as soon as they are saved. Visitors register there; online sessions show their link only to people who register."),
     editor.panel,
     sec({ title: "Upcoming", note: String(upcoming.length) },
-      upcoming.length ? h("ul", { class: "p-sessions" }, upcoming.map((s) => sessionRow(s, editor))) : empty("No upcoming sessions.")),
+      upcoming.length ? h("ul", { class: "p-sessions" }, upcoming.map((s) => sessionRow(s, editor, false, admin))) : empty("No upcoming sessions.")),
     past.length ? h("details", { class: "p-disclose" }, h("summary", {}, `Past sessions (${past.length})`),
-      h("ul", { class: "p-sessions" }, past.sort((a, b) => String(b.starts_at).localeCompare(String(a.starts_at))).map((s) => sessionRow(s, editor, true)))) : null);
+      h("ul", { class: "p-sessions" }, past.sort((a, b) => String(b.starts_at).localeCompare(String(a.starts_at))).map((s) => sessionRow(s, editor, true, admin)))) : null);
 }
 
-function sessionRow(s, editor, isPast = false) {
-  const regs = h("div", { class: "p-regs", hidden: true });
+// A button that opens one panel under a session, loading its contents the first time.
+function sessionPanel(label, load, panels) {
+  const box = h("div", { class: "p-regs", hidden: true });
+  const toggle = h("button", { type: "button", class: "p-textbtn", "aria-expanded": "false" }, label);
   let loaded = false;
-  const toggle = h("button", { type: "button", class: "p-textbtn", "aria-expanded": "false" }, `Sign-ups (${s.registered})`);
   toggle.addEventListener("click", async () => {
-    const opening = regs.hidden;
-    regs.hidden = !opening;
+    const opening = box.hidden;
+    panels.forEach((p) => { p.box.hidden = true; p.toggle.setAttribute("aria-expanded", "false"); });
+    box.hidden = !opening;
     toggle.setAttribute("aria-expanded", String(opening));
     if (!opening || loaded) return;
     loaded = true;
-    regs.replaceChildren(h("p", { class: "p-hint" }, "Loading…"));
+    box.replaceChildren(h("p", { class: "p-hint" }, "Loading…"));
     try {
-      regs.replaceChildren(registrationsPanel(s, await db.listRegistrations(s.id)));
+      box.replaceChildren(await load());
     } catch (err) {
       loaded = false;
-      regs.replaceChildren(empty(err.message));
+      box.replaceChildren(empty(err.message));
     }
   });
+  const panel = { box, toggle };
+  panels.push(panel);
+  return panel;
+}
+
+function sessionRow(s, editor, isPast = false, admin = false) {
+  const panels = [];
+  const signups = sessionPanel(`Sign-ups (${s.registered})`, async () => registrationsPanel(s, await db.listRegistrations(s.id)), panels);
+  const started = new Date(s.starts_at).getTime() <= Date.now();
+  const attendance = sessionPanel(`Attendance (${s.attended || 0})`, async () => {
+    const [list, regs] = await Promise.all([db.listAttendance(s.id), db.listRegistrations(s.id)]);
+    return attendancePanel(s, list, regs);
+  }, panels);
+  const checkin = admin ? sessionPanel("Check-in QR", async () => checkinPanel(s), panels) : null;
+  const regs = h("div", {}, panels.map((p) => p.box));
+  const toggle = h("span", { class: "p-session-toggles" }, signups.toggle, attendance.toggle, checkin ? checkin.toggle : null);
   const where = [s.location, s.meeting_url ? "online" : ""].filter(Boolean).join(" and ") || "place to be announced";
   return h("li", { class: `p-session${isPast ? " is-past" : ""}` },
     h("div", { class: "p-session-date", "aria-hidden": "true" }, h("span", {}, monthOf(s.starts_at)), h("b", {}, dateOf(s.starts_at))),
     h("div", { class: "p-session-main" },
       h("h3", {}, s.title),
       h("p", { class: "p-sub2" }, `${dayLong(s.starts_at)} · ${timeRange(s.starts_at, s.ends_at)} CT · ${where}`),
-      h("p", { class: "p-session-count" }, s.capacity ? `${s.registered} of ${s.capacity} seats taken` : `${s.registered} signed up`),
+      h("p", { class: "p-session-count" }, [s.capacity ? `${s.registered} of ${s.capacity} seats taken` : `${s.registered} signed up`, started || s.attended ? `${s.attended || 0} checked in` : ""].filter(Boolean).join(" · ")),
       h("div", { class: "p-session-actions" },
         toggle,
         isPast ? null : textBtn("Edit", () => editor.open(s)),
@@ -2291,6 +2310,108 @@ function registrationsPanel(s, list) {
           await again();
           toast("Removed.");
         }), "danger"))))))));
+}
+
+// Who checked in from the QR code, and whether they had signed up beforehand.
+function attendancePanel(s, list, regs) {
+  if (!list.length) return empty(new Date(s.starts_at).getTime() > Date.now() ? "Check-ins appear here once the session starts." : "No one checked in at this session.");
+  const signedUp = new Set(regs.map((r) => r.email));
+  const walkIns = list.filter((r) => !signedUp.has(r.email)).length;
+  const noShows = regs.filter((r) => !list.some((a) => a.email === r.email)).length;
+  const file = `foreman-${stem(s.title)}-${zonedParts(s.starts_at).day}-attendance.csv`;
+  return h("div", { class: "p-regs-inner" },
+    h("p", { class: "p-hint" }, `${list.length} checked in: ${list.length - walkIns} signed up beforehand, ${walkIns} walked in. ${noShows} ${noShows === 1 ? "person who signed up" : "people who signed up"} didn't check in.`),
+    h("div", { class: "p-form-actions" },
+      h("button", { type: "button", class: "btn btn-quiet btn-small", onclick: () => copyList(list.map((r) => r.email).join(", "), "Emails") }, "Copy emails"),
+      h("button", { type: "button", class: "btn btn-quiet btn-small", onclick: () => downloadFile(file, csv([["Name", "Email", "Year", "Signed up beforehand", "Checked in"], ...list.map((r) => [r.name, r.email, r.year, signedUp.has(r.email) ? "Yes" : "No", dateTime(r.created_at)])])) }, "Download CSV")),
+    h("div", { class: "p-table-wrap" }, h("table", { class: "p-table" },
+      h("thead", {}, h("tr", {}, ["Name", "Email", "Year", "Signed up", "Checked in", ""].map((c) => h("th", { scope: "col" }, c)))),
+      h("tbody", {}, list.map((r) => h("tr", {},
+        h("td", {}, h("span", { class: "p-strong" }, r.name)),
+        h("td", {}, r.email),
+        h("td", {}, r.year || "—"),
+        h("td", {}, signedUp.has(r.email) ? "Yes" : "Walk-in"),
+        h("td", {}, timeOf(r.created_at)),
+        h("td", { class: "p-td-actions" }, textBtn("Remove", (e) => confirmInline(e.currentTarget, { text: `Remove ${r.name}'s check-in?`, yes: "Remove", danger: true }, async () => {
+          await db.deleteAttendance(r.id);
+          await again();
+          toast("Check-in removed.");
+        }), "danger"))))))));
+}
+
+// The QR code that people scan in the room. Its link is shown only to administrators.
+function qrSvg(text) {
+  const q = qrcode(0, "M");
+  q.addData(text);
+  q.make();
+  const doc = new DOMParser().parseFromString(q.createSvgTag({ cellSize: 8, margin: 2, scalable: true }), "image/svg+xml");
+  const svg = document.importNode(doc.documentElement, true);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "QR code for this session's check-in link");
+  return svg;
+}
+
+function checkinUrl(token) {
+  return new URL(`../checkin.html#${token}`, location.href).href;
+}
+
+async function checkinPanel(s) {
+  const box = h("div", { class: "p-checkin" });
+  const draw = (token) => {
+    const url = checkinUrl(token);
+    const field = h("input", { class: "p-checkin-url", type: "text", readonly: true, value: url, "aria-label": "Check-in link" });
+    field.addEventListener("focus", () => field.select());
+    const renew = textBtn("Make a new link", (e) => confirmInline(e.currentTarget, {
+      text: "The current QR code and link will stop working straight away. Use this if the link was shared outside the room.", yes: "Make a new link", danger: true,
+    }, async () => {
+      draw(await db.checkinToken(s.id, true));
+      toast("New check-in link made. Print or show the new QR code.");
+    }), "danger");
+    box.replaceChildren(
+      h("div", { class: "p-checkin-qr" }, qrSvg(url)),
+      h("div", { class: "p-checkin-side" },
+        h("p", { class: "p-hint" }, "Show this code at the session. People scan it and check in with their name and email. It works from two hours before the session until four hours after it ends."),
+        field,
+        h("div", { class: "p-form-actions" },
+          h("button", { type: "button", class: "btn btn-small", onclick: () => showQrFullScreen(s, url) }, "Show full screen"),
+          h("button", { type: "button", class: "btn btn-quiet btn-small", onclick: () => copyText(url, null) }, "Copy link"),
+          h("button", { type: "button", class: "btn btn-quiet btn-small", onclick: () => downloadSvg(`foreman-checkin-${zonedParts(s.starts_at).day}.svg`, qrSvg(url)) }, "Download QR")),
+        h("p", { class: "p-hint" }, "Only administrators can see this link. Keep it off slides you share afterwards."),
+        renew));
+  };
+  draw(await db.checkinToken(s.id));
+  return box;
+}
+
+function showQrFullScreen(s, url) {
+  const close = h("button", { type: "button", class: "p-textbtn p-qrfull-close" }, "Close");
+  const layer = h("div", { class: "p-qrfull", role: "dialog", "aria-modal": "true", "aria-label": "Check-in QR code" },
+    h("div", { class: "p-qrfull-inner" },
+      h("p", { class: "p-qrfull-kicker" }, s.title),
+      h("h2", {}, "Scan to check in"),
+      h("div", { class: "p-qrfull-code" }, qrSvg(url)),
+      h("p", { class: "p-qrfull-when" }, `${dayLong(s.starts_at)}, ${timeRange(s.starts_at, s.ends_at)}`)),
+    close);
+  const done = () => { layer.remove(); document.removeEventListener("keydown", onKey); };
+  const onKey = (e) => { if (e.key === "Escape") done(); };
+  close.addEventListener("click", done);
+  document.addEventListener("keydown", onKey);
+  document.body.append(layer);
+  close.focus();
+  if (layer.requestFullscreen) layer.requestFullscreen().catch(() => {});
+  layer.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement) done(); });
+}
+
+function downloadSvg(name, svg) {
+  svg.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  svg.setAttribute("width", "1200");
+  svg.setAttribute("height", "1200");
+  const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)], { type: "image/svg+xml" }));
+  const a = h("a", { href: url, download: name, hidden: true });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
 function sessionForm(s, cycles, state, close) {

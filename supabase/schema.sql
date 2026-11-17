@@ -220,6 +220,26 @@ create table if not exists public.notify_list (
   created_at timestamptz not null default now()
 );
 
+-- The private check-in link for each info session. Only administrators can see it,
+-- through session_checkin_token(); a new token makes the old QR code stop working.
+create table if not exists public.session_checkin_links (
+  session_id uuid primary key references public.info_sessions (id) on delete cascade,
+  token text not null unique default replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', ''),
+  created_at timestamptz not null default now()
+);
+
+-- Who checked in at each info session, from the QR code shown in the room.
+create table if not exists public.session_attendance (
+  id uuid primary key default gen_random_uuid(),
+  session_id uuid not null references public.info_sessions (id) on delete cascade,
+  name text not null check (char_length(name) between 1 and 200),
+  email text not null check (char_length(email) between 3 and 320),
+  year text not null default '' check (char_length(year) <= 40),
+  created_at timestamptz not null default now(),
+  unique (session_id, email)
+);
+create index if not exists session_attendance_session_idx on public.session_attendance (session_id);
+
 create index if not exists engagement_people_user_idx on public.engagement_people (user_id);
 create index if not exists engagement_people_engagement_idx on public.engagement_people (engagement_id);
 create index if not exists documents_engagement_idx on public.documents (engagement_id);
@@ -639,6 +659,62 @@ begin
 end;
 $$;
 
+-- Administrators get the check-in link for a session, creating it the first time.
+-- Pass p_new => true to replace it, for example if a photo of the QR code was shared.
+create or replace function public.session_checkin_token(p_session uuid, p_new boolean default false) returns text
+language plpgsql security definer set search_path = public as $$
+declare
+  tok text;
+begin
+  if not public.is_admin() then
+    raise exception 'Only administrators can see check-in links.';
+  end if;
+  if not exists (select 1 from public.info_sessions where id = p_session) then
+    raise exception 'This session is no longer on the calendar.';
+  end if;
+  if p_new then
+    delete from public.session_checkin_links where session_id = p_session;
+  end if;
+  insert into public.session_checkin_links (session_id) values (p_session) on conflict (session_id) do nothing;
+  select token into tok from public.session_checkin_links where session_id = p_session;
+  return tok;
+end;
+$$;
+
+-- Someone in the room checks in from the QR code. The link works from two hours before
+-- the session until four hours after it ends, and checking in twice is harmless.
+create or replace function public.check_in_to_session(p_token text, p_name text, p_email text, p_year text default '')
+returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  s public.info_sessions;
+  clean_email text := lower(trim(coalesce(p_email, '')));
+  clean_name text := left(trim(coalesce(p_name, '')), 200);
+  added int;
+begin
+  select i.* into s
+  from public.session_checkin_links l join public.info_sessions i on i.id = l.session_id
+  where l.token = coalesce(p_token, '');
+  if not found then
+    raise exception 'This check-in link isn''t valid. Scan the QR code shown at the session.';
+  end if;
+  if now() < s.starts_at - interval '2 hours' or now() > s.ends_at + interval '4 hours' then
+    raise exception 'Check-in for this session is closed.';
+  end if;
+  if clean_name = '' then
+    raise exception 'Please add your name.';
+  end if;
+  if char_length(clean_email) > 320 or clean_email !~ '^[^@[:space:]]+@[^@[:space:]]+[.][^@[:space:]]+$' then
+    raise exception 'Please check your email address.';
+  end if;
+  insert into public.session_attendance (session_id, name, email, year)
+  values (s.id, clean_name, clean_email, left(trim(coalesce(p_year, '')), 40))
+  on conflict (session_id, email) do nothing;
+  get diagnostics added = row_count;
+  return jsonb_build_object('title', s.title, 'starts_at', s.starts_at, 'ends_at', s.ends_at, 'already', added = 0);
+end;
+$$;
+
 -- Administrators set each person's access. No one can remove their own.
 create or replace function public.set_role(target uuid, new_role text) returns void
 language plpgsql security definer set search_path = public as $$
@@ -673,6 +749,8 @@ alter table public.announcements enable row level security;
 alter table public.cycles enable row level security;
 alter table public.team_members enable row level security;
 alter table public.info_sessions enable row level security;
+alter table public.session_checkin_links enable row level security;
+alter table public.session_attendance enable row level security;
 alter table public.session_registrations enable row level security;
 alter table public.notify_list enable row level security;
 
@@ -837,6 +915,13 @@ create policy "notify: recruiters read" on public.notify_list
 drop policy if exists "notify: recruiters remove" on public.notify_list;
 create policy "notify: recruiters remove" on public.notify_list
   for delete to authenticated using (public.is_recruiter());
+-- Check-in links have no policies: they are reached only through session_checkin_token().
+drop policy if exists "attendance: recruiters read" on public.session_attendance;
+create policy "attendance: recruiters read" on public.session_attendance
+  for select to authenticated using (public.is_recruiter());
+drop policy if exists "attendance: recruiters remove" on public.session_attendance;
+create policy "attendance: recruiters remove" on public.session_attendance
+  for delete to authenticated using (public.is_recruiter());
 
 
 -- ============================================================== table privileges
@@ -859,6 +944,9 @@ grant select, insert, update, delete on public.cycles, public.team_members, publ
 -- Sign-ups arrive only through register_for_session() and join_notify_list().
 revoke insert, update on public.session_registrations, public.notify_list from authenticated;
 grant select, delete on public.session_registrations, public.notify_list to authenticated;
+-- Check-ins arrive only through check_in_to_session(); links only through session_checkin_token().
+revoke all on public.session_checkin_links, public.session_attendance from anon, authenticated;
+grant select, delete on public.session_attendance to authenticated;
 
 revoke execute on function public.claim_invite(text) from public, anon;
 revoke execute on function public.set_role(uuid, text) from public, anon;
@@ -867,6 +955,9 @@ grant execute on function public.set_role(uuid, text) to authenticated;
 grant execute on function public.recruiting_public() to anon, authenticated;
 grant execute on function public.register_for_session(uuid, text, text, text) to anon, authenticated;
 grant execute on function public.join_notify_list(text, text) to anon, authenticated;
+revoke execute on function public.session_checkin_token(uuid, boolean) from public, anon;
+grant execute on function public.session_checkin_token(uuid, boolean) to authenticated;
+grant execute on function public.check_in_to_session(text, text, text, text) to anon, authenticated;
 
 
 -- ============================================================== file storage

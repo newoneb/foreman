@@ -1382,3 +1382,7 @@ a { color: inherit; text-decoration-thickness: 1px; text-underline-offset: 0.22e
 .recruit-pop-x { position: absolute; top: 12px; right: 12px; display: grid; place-items: center; width: 36px; height: 36px; padding: 0; border: 0; background: none; color: var(--ink-3); cursor: pointer; }
 .recruit-pop-x:hover { color: var(--ink); }
 @media (prefers-reduced-motion: reduce) { .recruit-pop { transition: none; } }
+
+/* Info session check-in */
+.checkin .form { margin-top: 40px; max-width: 40rem; }
+.checkin-done:focus { outline: none; }
