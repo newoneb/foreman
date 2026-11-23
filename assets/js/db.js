@@ -68,6 +68,7 @@ function pick(source, keys) {
 }
 
 const APPLICATION_FIELDS = ["full_name", "answers", "resume_path", "resume_name"];
+const SLOT_FIELDS = ["round", "starts_at", "ends_at", "location", "meeting_url", "capacity"];
 const CYCLE_FIELDS = ["name", "opens_at", "closes_at", "decisions_by", "note"];
 const SESSION_FIELDS = ["title", "starts_at", "ends_at", "location", "meeting_url", "capacity", "details", "cycle_id"];
 const TEAM_FIELDS = ["name", "title", "teams", "bio", "class_year", "major", "photo_path", "linkedin_url", "email", "booking_url",
@@ -535,6 +536,36 @@ function createLive() {
     async checkinToken(sessionId, renew = false) {
       return run((c) => c.rpc("session_checkin_token", { p_session: sessionId, p_new: renew }));
     },
+
+    // Interview times (administrators manage them; applicants book through the functions below)
+    async listInterviewSlots() {
+      const [slots, bookings] = await Promise.all([
+        run((c) => c.from("interview_slots").select("*").order("starts_at")),
+        run((c) => c.from("interview_bookings").select("id, slot_id, application_id, round, created_at, applications(full_name, email)")),
+      ]);
+      return slots.map((s) => ({
+        ...s,
+        bookings: bookings.filter((b) => b.slot_id === s.id).map(({ applications: a, ...b }) => ({ ...b, name: a ? a.full_name : "", email: a ? a.email : "" })),
+      }));
+    },
+    async createInterviewSlots(rows) {
+      return run((c) => c.from("interview_slots").insert(rows.map((r) => pick(r, SLOT_FIELDS))).select());
+    },
+    async deleteInterviewSlot(id) {
+      await run((c) => c.from("interview_slots").delete().eq("id", id));
+    },
+    async deleteInterviewBooking(id) {
+      await run((c) => c.from("interview_bookings").delete().eq("id", id));
+    },
+    async myInterviewOptions() {
+      return run((c) => c.rpc("my_interview_options"));
+    },
+    async bookInterview(slotId) {
+      return run((c) => c.rpc("book_interview", { p_slot: slotId }));
+    },
+    async cancelMyInterview() {
+      await run((c) => c.rpc("cancel_my_interview"));
+    },
     async deleteRegistration(id) {
       await run((c) => c.from("session_registrations").delete().eq("id", id));
     },
@@ -602,6 +633,8 @@ function createDemo() {
   let state = read() || seed();
   state.attendance = state.attendance || [];
   state.checkinLinks = state.checkinLinks || [];
+  state.interviewSlots = state.interviewSlots || [];
+  state.interviewBookings = state.interviewBookings || [];
   write();
 
   function read() {
@@ -940,6 +973,70 @@ function createDemo() {
       }
       const { cycle_id, created_at, capacity, ...out } = s;
       return copy({ ...out, already });
+    },
+    async listInterviewSlots() {
+      allow(isAdmin());
+      return copy(state.interviewSlots.slice().sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at))).map((s) => ({
+        ...s,
+        bookings: state.interviewBookings.filter((b) => b.slot_id === s.id).map((b) => {
+          const a = state.applications.find((x) => x.id === b.application_id);
+          return { ...b, name: a ? a.full_name : "", email: a ? a.email : "" };
+        }),
+      })));
+    },
+    async createInterviewSlots(rows) {
+      allow(isAdmin());
+      return copy(rows.map((r) => add("interviewSlots", { location: "", meeting_url: "", capacity: 1, ...pick(r, SLOT_FIELDS) })));
+    },
+    async deleteInterviewSlot(id) {
+      allow(isAdmin());
+      state.interviewBookings = state.interviewBookings.filter((b) => b.slot_id !== id);
+      drop("interviewSlots", (s) => s.id === id);
+    },
+    async deleteInterviewBooking(id) { allow(isAdmin()); drop("interviewBookings", (b) => b.id === id); },
+    async myInterviewOptions() {
+      const p = need();
+      const a = state.applications.find((x) => x.user_id === p.id);
+      if (!a || !["interview_1", "interview_2"].includes(a.status)) return { round: null, booking: null, slots: [] };
+      const cutoff = at() + 2 * 36e5;
+      const taken = (s) => state.interviewBookings.filter((b) => b.slot_id === s.id).length;
+      const mine = state.interviewBookings.find((b) => b.application_id === a.id && b.round === a.status);
+      const slot = mine && state.interviewSlots.find((s) => s.id === mine.slot_id);
+      return copy({
+        round: a.status,
+        booking: slot ? { slot_id: slot.id, starts_at: slot.starts_at, ends_at: slot.ends_at, location: slot.location, meeting_url: slot.meeting_url, can_change: new Date(slot.starts_at).getTime() > cutoff } : null,
+        slots: state.interviewSlots.filter((s) => s.round === a.status && new Date(s.starts_at).getTime() > cutoff)
+          .sort((x, y) => String(x.starts_at).localeCompare(String(y.starts_at)))
+          .map((s) => ({ id: s.id, starts_at: s.starts_at, ends_at: s.ends_at, location: s.location, available: taken(s) < s.capacity, mine: Boolean(mine && mine.slot_id === s.id) })),
+      });
+    },
+    async bookInterview(slotId) {
+      await pause(200);
+      const p = need();
+      const a = state.applications.find((x) => x.user_id === p.id);
+      if (!a) throw new Error("Start an application first.");
+      const s = state.interviewSlots.find((x) => x.id === slotId);
+      if (!s) throw new Error("That time is no longer offered. Please choose another.");
+      if (a.status !== s.round) throw new Error("This time is for a different interview.");
+      const cutoff = at() + 2 * 36e5;
+      if (new Date(s.starts_at).getTime() <= cutoff) throw new Error("That time has closed. Please choose another.");
+      const current = state.interviewBookings.find((b) => b.application_id === a.id && b.round === s.round);
+      if (current && current.slot_id === s.id) return copy({ starts_at: s.starts_at, ends_at: s.ends_at, location: s.location, meeting_url: s.meeting_url });
+      const old = current && state.interviewSlots.find((x) => x.id === current.slot_id);
+      if (old && new Date(old.starts_at).getTime() <= cutoff) throw new Error("Your interview is less than two hours away, so it can no longer be changed. Reply to our email if you need help.");
+      if (state.interviewBookings.filter((b) => b.slot_id === s.id).length >= s.capacity) throw new Error("Someone just took that time. Please choose another.");
+      state.interviewBookings = state.interviewBookings.filter((b) => !(b.application_id === a.id && b.round === s.round));
+      add("interviewBookings", { slot_id: s.id, application_id: a.id, round: s.round });
+      return copy({ starts_at: s.starts_at, ends_at: s.ends_at, location: s.location, meeting_url: s.meeting_url });
+    },
+    async cancelMyInterview() {
+      const p = need();
+      const a = state.applications.find((x) => x.user_id === p.id);
+      if (!a) return;
+      const current = state.interviewBookings.find((b) => b.application_id === a.id && b.round === a.status);
+      const slot = current && state.interviewSlots.find((x) => x.id === current.slot_id);
+      if (slot && new Date(slot.starts_at).getTime() <= at() + 2 * 36e5) throw new Error("Your interview is less than two hours away, so it can no longer be cancelled here. Reply to our email instead.");
+      drop("interviewBookings", (b) => b.application_id === a.id && b.round === a.status);
     },
     async checkIn(token, { name, email, year }) {
       await pause(300);
@@ -1282,6 +1379,13 @@ function seed() {
       { id: "demo-att-2", session_id: "demo-ses-past", name: "Leo Grant", email: "leo.grant@example.edu", year: "Second-year", created_at: at(12, -0.25) },
     ],
     checkinLinks: [],
+    interviewSlots: [
+      ...["13:00", "13:30", "14:00", "14:30", "15:00", "15:30"].map((t, i) => ({ id: `demo-slot-1-${i}`, round: "interview_1", starts_at: chicago(2, t), ends_at: chicago(2, ["13:30", "14:00", "14:30", "15:00", "15:30", "16:00"][i]), location: "Harper Memorial Library, Room 130", meeting_url: "", capacity: 1, created_at: at(1) })),
+      ...["14:00", "14:45", "15:30"].map((t, i) => ({ id: `demo-slot-2-${i}`, round: "interview_2", starts_at: chicago(4, t), ends_at: chicago(4, ["14:45", "15:30", "16:15"][i]), location: "Saieh Hall, Room 203", meeting_url: "", capacity: 1, created_at: at(1) })),
+    ],
+    interviewBookings: [
+      { id: "demo-book-1", slot_id: "demo-slot-1-1", application_id: "demo-app-lily", round: "interview_1", created_at: at(0, 5) },
+    ],
   };
 }
 

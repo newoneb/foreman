@@ -240,6 +240,31 @@ create table if not exists public.session_attendance (
 );
 create index if not exists session_attendance_session_idx on public.session_attendance (session_id);
 
+-- Interview times that administrators publish for applicants invited to a round.
+create table if not exists public.interview_slots (
+  id uuid primary key default gen_random_uuid(),
+  round text not null check (round in ('interview_1', 'interview_2')),
+  starts_at timestamptz not null,
+  ends_at timestamptz not null,
+  location text not null default '' check (char_length(location) <= 300),
+  meeting_url text not null default '' check (char_length(meeting_url) <= 500),
+  capacity int not null default 1 check (capacity between 1 and 20),
+  created_at timestamptz not null default now(),
+  check (ends_at > starts_at)
+);
+create index if not exists interview_slots_start_idx on public.interview_slots (starts_at);
+
+-- Which application booked which time. Each application books one time per round.
+create table if not exists public.interview_bookings (
+  id uuid primary key default gen_random_uuid(),
+  slot_id uuid not null references public.interview_slots (id) on delete cascade,
+  application_id uuid not null references public.applications (id) on delete cascade,
+  round text not null check (round in ('interview_1', 'interview_2')),
+  created_at timestamptz not null default now(),
+  unique (application_id, round)
+);
+create index if not exists interview_bookings_slot_idx on public.interview_bookings (slot_id);
+
 create index if not exists engagement_people_user_idx on public.engagement_people (user_id);
 create index if not exists engagement_people_engagement_idx on public.engagement_people (engagement_id);
 create index if not exists documents_engagement_idx on public.documents (engagement_id);
@@ -715,6 +740,97 @@ begin
 end;
 $$;
 
+-- The interview times an applicant can choose from. Applicants see only whether a time
+-- is still open, never who took it. The meeting link is shared once a time is booked.
+create or replace function public.my_interview_options() returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+declare
+  a public.applications;
+begin
+  select * into a from public.applications where user_id = auth.uid();
+  if not found or a.status not in ('interview_1', 'interview_2') then
+    return jsonb_build_object('round', null, 'booking', null, 'slots', '[]'::jsonb);
+  end if;
+  return jsonb_build_object(
+    'round', a.status,
+    'booking', (
+      select jsonb_build_object('slot_id', s.id, 'starts_at', s.starts_at, 'ends_at', s.ends_at,
+        'location', s.location, 'meeting_url', s.meeting_url,
+        'can_change', s.starts_at > now() + interval '2 hours')
+      from public.interview_bookings b join public.interview_slots s on s.id = b.slot_id
+      where b.application_id = a.id and b.round = a.status),
+    'slots', coalesce((
+      select jsonb_agg(jsonb_build_object('id', s.id, 'starts_at', s.starts_at, 'ends_at', s.ends_at, 'location', s.location,
+          'available', (select count(*) from public.interview_bookings b where b.slot_id = s.id) < s.capacity,
+          'mine', exists (select 1 from public.interview_bookings b where b.slot_id = s.id and b.application_id = a.id))
+        order by s.starts_at)
+      from public.interview_slots s
+      where s.round = a.status and s.starts_at > now() + interval '2 hours'), '[]'::jsonb));
+end;
+$$;
+
+-- An applicant books a time, or moves an existing booking to a new one. Times close
+-- two hours before they start. Locking the time makes two people unable to take its last place.
+create or replace function public.book_interview(p_slot uuid) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  a public.applications;
+  s public.interview_slots;
+  taken int;
+begin
+  select * into a from public.applications where user_id = auth.uid();
+  if not found then
+    raise exception 'Start an application first.';
+  end if;
+  select * into s from public.interview_slots where id = p_slot for update;
+  if not found then
+    raise exception 'That time is no longer offered. Please choose another.';
+  end if;
+  if a.status is distinct from s.round then
+    raise exception 'This time is for a different interview.';
+  end if;
+  if s.starts_at <= now() + interval '2 hours' then
+    raise exception 'That time has closed. Please choose another.';
+  end if;
+  if exists (select 1 from public.interview_bookings b where b.slot_id = s.id and b.application_id = a.id) then
+    return jsonb_build_object('starts_at', s.starts_at, 'ends_at', s.ends_at, 'location', s.location, 'meeting_url', s.meeting_url);
+  end if;
+  if exists (
+    select 1 from public.interview_bookings b join public.interview_slots o on o.id = b.slot_id
+    where b.application_id = a.id and b.round = s.round and o.starts_at <= now() + interval '2 hours'
+  ) then
+    raise exception 'Your interview is less than two hours away, so it can no longer be changed. Reply to our email if you need help.';
+  end if;
+  select count(*) into taken from public.interview_bookings where slot_id = s.id;
+  if taken >= s.capacity then
+    raise exception 'Someone just took that time. Please choose another.';
+  end if;
+  delete from public.interview_bookings where application_id = a.id and round = s.round;
+  insert into public.interview_bookings (slot_id, application_id, round) values (s.id, a.id, s.round);
+  return jsonb_build_object('starts_at', s.starts_at, 'ends_at', s.ends_at, 'location', s.location, 'meeting_url', s.meeting_url);
+end;
+$$;
+
+-- An applicant gives up their time, up to two hours before it starts.
+create or replace function public.cancel_my_interview() returns void
+language plpgsql security definer set search_path = public as $$
+declare
+  a public.applications;
+begin
+  select * into a from public.applications where user_id = auth.uid();
+  if not found then
+    return;
+  end if;
+  if exists (
+    select 1 from public.interview_bookings b join public.interview_slots s on s.id = b.slot_id
+    where b.application_id = a.id and b.round = a.status and s.starts_at <= now() + interval '2 hours'
+  ) then
+    raise exception 'Your interview is less than two hours away, so it can no longer be cancelled here. Reply to our email instead.';
+  end if;
+  delete from public.interview_bookings where application_id = a.id and round = a.status;
+end;
+$$;
+
 -- Administrators set each person's access. No one can remove their own.
 create or replace function public.set_role(target uuid, new_role text) returns void
 language plpgsql security definer set search_path = public as $$
@@ -751,6 +867,8 @@ alter table public.team_members enable row level security;
 alter table public.info_sessions enable row level security;
 alter table public.session_checkin_links enable row level security;
 alter table public.session_attendance enable row level security;
+alter table public.interview_slots enable row level security;
+alter table public.interview_bookings enable row level security;
 alter table public.session_registrations enable row level security;
 alter table public.notify_list enable row level security;
 
@@ -922,6 +1040,14 @@ create policy "attendance: recruiters read" on public.session_attendance
 drop policy if exists "attendance: recruiters remove" on public.session_attendance;
 create policy "attendance: recruiters remove" on public.session_attendance
   for delete to authenticated using (public.is_recruiter());
+-- Interview times and bookings are managed by administrators, who also see applications.
+-- Applicants reach them only through my_interview_options() and book_interview().
+drop policy if exists "interview slots: admins manage" on public.interview_slots;
+create policy "interview slots: admins manage" on public.interview_slots
+  for all to authenticated using (public.is_admin()) with check (public.is_admin());
+drop policy if exists "interview bookings: admins manage" on public.interview_bookings;
+create policy "interview bookings: admins manage" on public.interview_bookings
+  for all to authenticated using (public.is_admin()) with check (public.is_admin());
 
 
 -- ============================================================== table privileges
@@ -947,6 +1073,8 @@ grant select, delete on public.session_registrations, public.notify_list to auth
 -- Check-ins arrive only through check_in_to_session(); links only through session_checkin_token().
 revoke all on public.session_checkin_links, public.session_attendance from anon, authenticated;
 grant select, delete on public.session_attendance to authenticated;
+revoke all on public.interview_slots, public.interview_bookings from anon;
+grant select, insert, update, delete on public.interview_slots, public.interview_bookings to authenticated;
 
 revoke execute on function public.claim_invite(text) from public, anon;
 revoke execute on function public.set_role(uuid, text) from public, anon;
@@ -958,6 +1086,12 @@ grant execute on function public.join_notify_list(text, text) to anon, authentic
 revoke execute on function public.session_checkin_token(uuid, boolean) from public, anon;
 grant execute on function public.session_checkin_token(uuid, boolean) to authenticated;
 grant execute on function public.check_in_to_session(text, text, text, text) to anon, authenticated;
+revoke execute on function public.my_interview_options() from public, anon;
+revoke execute on function public.book_interview(uuid) from public, anon;
+revoke execute on function public.cancel_my_interview() from public, anon;
+grant execute on function public.my_interview_options() to authenticated;
+grant execute on function public.book_interview(uuid) to authenticated;
+grant execute on function public.cancel_my_interview() to authenticated;
 
 
 -- ============================================================== file storage

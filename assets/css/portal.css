@@ -1062,3 +1062,31 @@ a.p-strong:hover { text-decoration: underline; text-underline-offset: 0.22em; }
 .p-qrfull-code svg { display: block; width: 100%; height: auto; }
 .p-qrfull-when { font: 400 1rem/1.4 var(--sans); color: #465068; }
 .p-qrfull-close { position: absolute; top: 20px; right: 24px; }
+
+/* Interview times */
+.p-interview { display: grid; gap: 14px; margin: 8px 0 32px; padding: 28px; border: 1px solid var(--line); background: var(--bg); }
+.p-interview h2 { font-family: var(--serif); font-weight: 400; font-size: 1.6rem; line-height: 1.15; }
+.p-interview-when { font-size: 1.125rem; font-weight: 500; }
+.p-interview > .p-textbtn { justify-self: start; }
+.p-interview-where { color: var(--ink-2, var(--ink)); }
+.p-slots { display: grid; gap: 22px; }
+.p-slot-day h3 { margin-bottom: 10px; font-size: 0.9375rem; font-weight: 600; }
+.p-slot-list { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; padding: 0; }
+.p-slot { display: inline-flex; flex-direction: column; align-items: center; min-width: 104px; min-height: 44px; padding: 8px 14px; border: 1px solid var(--ink); background: var(--bg); color: var(--ink); font: 500 0.9375rem/1.2 var(--sans); cursor: pointer; }
+.p-slot:hover:not(:disabled) { background: var(--ink); color: var(--bg); }
+.p-slot:focus-visible { outline: 2px solid var(--signal, var(--ink)); outline-offset: 2px; }
+.p-slot:disabled { border-color: var(--line); color: var(--ink-3, #9aa1ae); cursor: not-allowed; text-decoration: line-through; }
+.p-slot.is-mine { background: var(--ink); color: var(--bg); }
+.p-slot-note { font-size: 0.75rem; font-weight: 400; text-decoration: none; display: block; }
+.p-slot:disabled .p-slot-note { text-decoration: none; }
+.p-waiting { display: grid; gap: 6px; list-style: none; padding: 0; margin-bottom: 12px; }
+.p-waiting li { display: flex; gap: 12px; align-items: baseline; }
+.p-booked { display: grid; gap: 4px; list-style: none; padding: 0; }
+.p-booked li { display: flex; gap: 12px; align-items: baseline; }
+.p-slot-admin-day { margin-bottom: 24px; }
+.p-slot-admin-day h3 { margin-bottom: 8px; font-size: 0.9375rem; font-weight: 600; }
+.p-slot-admin-day .p-table { table-layout: fixed; }
+.p-slot-admin-day .p-table th:nth-child(1) { width: 18%; }
+.p-slot-admin-day .p-table th:nth-child(2) { width: 18%; }
+.p-slot-admin-day .p-table th:nth-child(3) { width: 30%; }
+.p-slot-admin-day .p-table th:nth-child(5) { width: 10%; }

@@ -9,6 +9,7 @@ import {
   zonedISO, zonedParts, todayISO, recruitingPhase, closesLabel, dayLong, dayShort, timeOf, timeRange, calendarDay, monthOf, dateOf,
   daysUntil, initialsOf, TEAM_ORDER,
 } from "./recruit-shared.js";
+import { googleCalendarUrl, icsFile } from "./recruit-shared.js";
 import qrcode from "./vendor/qrcode.js";
 
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -885,8 +886,8 @@ function applicationStatusText(a, recruiting) {
   switch (a.status) {
     case "draft": return "Your draft is saved. Submit it while applications are open.";
     case "submitted": return `Submitted on ${date(a.submitted_at)}. We review applications after the deadline${by ? ` and share decisions by ${by}` : ""}, and we will email you about next steps.`;
-    case "interview_1": return "You are invited to a first interview. We will email you to arrange a time.";
-    case "interview_2": return "You are invited to a case interview. We will email you to arrange a time.";
+    case "interview_1": return "You are invited to a first interview. Choose a time on your application page.";
+    case "interview_2": return "You are invited to a case interview. Choose a time on your application page.";
     case "accepted": return "Welcome to Foreman. Your member access is active.";
     case "declined": return "Thank you for applying. We are not able to offer you a place this time, and you are welcome to apply again in a future cycle.";
     default: return "";
@@ -895,6 +896,8 @@ function applicationStatusText(a, recruiting) {
 
 async function viewApply(t) {
   const [application, recruiting] = await Promise.all([db.myApplication(), db.recruitingPublic().catch(() => null)]);
+  const invited = application && ["interview_1", "interview_2"].includes(application.status);
+  const interviews = invited ? await db.myInterviewOptions().catch(() => null) : null;
   if (t !== token) return;
   S.hasApplication = Boolean(application);
   const state = recruitingPhase(recruiting || {});
@@ -917,13 +920,95 @@ async function viewApply(t) {
   }
   screen(t, {
     title: "Your application",
-    sub: editing ? "Answer in your own words. Your draft saves as you write, so you can return to it at any time." : applicationStatusText(application, recruiting),
+    sub: editing ? "Answer in your own words. Your draft saves as you write, so you can return to it at any time."
+      : invited && interviews ? `You are invited to a ${application.status === "interview_1" ? "first" : "case"} interview. ${interviews.booking ? "Your time is booked below." : "Choose a time below."}`
+        : applicationStatusText(application, recruiting),
   },
   tracker(application ? application.status : "draft"),
+  invited && interviews ? interviewPicker(interviews) : null,
   cycleNote,
   db.demo ? h("aside", { class: "p-note" }, h("h2", {}, "Demo mode"), h("p", {}, "This portal isn't connected yet, so applications stay in this browser and are not sent to Foreman.")) : null,
   application && application.message ? h("aside", { class: "p-note" }, h("h2", {}, "A note from Foreman"), h("p", {}, application.message)) : null,
   editing ? applicationForm(application, canSubmit ? null : (state.phase === "upcoming" ? `You can submit once applications open on ${dayLong(state.cycle.opens_at)}.` : "Applications are closed. You can submit when the next cycle opens.")) : applicationSummary(application));
+}
+
+// ---- interview times, for applicants invited to a round
+
+const ROUND = { interview_1: "First interview", interview_2: "Case interview" };
+const roundLower = (r) => (r === "interview_1" ? "first interview" : "case interview");
+
+function interviewEvent(r, b) {
+  return { id: b.slot_id, title: ROUND[r], starts_at: b.starts_at, ends_at: b.ends_at, location: b.location, meeting_url: b.meeting_url, details: "Your Foreman interview." };
+}
+
+function interviewPicker(o) {
+  const box = h("section", { class: "p-interview", "aria-labelledby": "interview-title" });
+  const b = o.booking;
+  const list = slotChooser(o);
+  if (b) {
+    list.hidden = true;
+    const ev = interviewEvent(o.round, b);
+    const change = h("button", { type: "button", class: "btn btn-quiet btn-small" }, "Change time");
+    change.addEventListener("click", () => { list.hidden = !list.hidden; change.textContent = list.hidden ? "Change time" : "Keep this time"; });
+    const cancel = textBtn("Cancel my interview", (e) => confirmInline(e.currentTarget, { text: "Give up this time? Someone else may take it.", yes: "Cancel interview", danger: true }, async () => {
+      await db.cancelMyInterview();
+      await again();
+      toast("Your interview time is cancelled. Choose a new one when you're ready.");
+    }), "danger");
+    box.append(...[
+      h("h2", { id: "interview-title" }, `Your ${roundLower(o.round)}`),
+      h("p", { class: "p-interview-when" }, `${dayLong(b.starts_at)}, ${timeRange(b.starts_at, b.ends_at)} (Chicago time)`),
+      b.location ? h("p", { class: "p-interview-where" }, b.location) : null,
+      b.meeting_url ? h("p", { class: "p-interview-where" }, h("a", { class: "link", href: b.meeting_url, target: "_blank", rel: "noopener" }, "Join online", icon("external"))) : null,
+      h("div", { class: "p-form-actions" },
+        h("a", { class: "btn btn-small", href: googleCalendarUrl(ev), target: "_blank", rel: "noopener" }, "Add to Google Calendar"),
+        h("button", { type: "button", class: "btn btn-quiet btn-small", onclick: () => downloadFile("foreman-interview.ics", icsFile(ev), "text/calendar") }, "Download for other calendars"),
+        b.can_change ? change : null),
+      b.can_change ? list : h("p", { class: "p-hint" }, "Your interview is less than two hours away. If you need to change it, reply to our email."),
+      b.can_change ? cancel : null].filter(Boolean));
+  } else {
+    box.append(...[
+      h("h2", { id: "interview-title" }, `Choose a time for your ${roundLower(o.round)}`),
+      o.slots.length ? h("p", { class: "p-hint" }, "Pick any open time. Times are in Chicago time, and booking closes two hours before each one.") : null,
+      list].filter(Boolean));
+  }
+  return box;
+}
+
+function slotChooser(o) {
+  const wrap = h("div", { class: "p-slots" });
+  const open = o.slots.filter((s) => s.available || s.mine);
+  if (!open.length) {
+    wrap.append(empty(o.slots.length ? "Every time is taken right now. We'll add more and email you." : "We haven't posted interview times yet. We'll email you as soon as they're up."));
+    return wrap;
+  }
+  const days = new Map();
+  for (const s of o.slots) {
+    const day = zonedParts(s.starts_at).day;
+    if (!days.has(day)) days.set(day, []);
+    days.get(day).push(s);
+  }
+  for (const [, slots] of days) {
+    wrap.append(h("div", { class: "p-slot-day" },
+      h("h3", {}, dayLong(slots[0].starts_at)),
+      h("ul", { class: "p-slot-list" }, slots.map((s) => {
+        const label = timeOf(s.starts_at);
+        const btn = h("button", { type: "button", class: `p-slot${s.mine ? " is-mine" : ""}`, disabled: !s.available && !s.mine, "aria-pressed": s.mine ? "true" : "false" },
+          label, !s.available && !s.mine ? h("span", { class: "p-slot-note" }, "Taken") : s.mine ? h("span", { class: "p-slot-note" }, "Yours") : null);
+        if (s.available && !s.mine) btn.addEventListener("click", () => confirmInline(btn, { text: `Book ${dayLong(s.starts_at)} at ${label}?`, yes: "Book this time" }, async () => {
+          try {
+            await db.bookInterview(s.id);
+            await again();
+            toast(`Booked. See you ${dayLong(s.starts_at)} at ${label}.`);
+          } catch (err) {
+            toast(err.message, "bad");
+            await again();
+          }
+        }));
+        return h("li", {}, btn);
+      }))));
+  }
+  return wrap;
 }
 
 function tracker(status) {
@@ -2110,10 +2195,16 @@ async function viewRecruiting(t, tab = "") {
   const upcoming = sessions.filter((s) => new Date(s.ends_at) > now).sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at)));
   const past = sessions.filter((s) => new Date(s.ends_at) <= now);
   const current = state.phase !== "closed" ? state.cycle : null;
-  const tabs = [["", "Cycles"], ["sessions", "Info sessions"], ["notify", "Notify list"]];
+  const tabs = [["", "Cycles"], ["sessions", "Info sessions"], admin ? ["interviews", "Interviews"] : null, ["notify", "Notify list"]].filter(Boolean);
   const which = tabs.some(([k]) => k === tab) ? tab : "";
   const stat = (n, label, href) => h(href ? "a" : "div", { class: "p-stat", href }, h("b", { "data-count": String(n) }, String(n)), h("span", {}, label));
+  let slots = null;
+  if (which === "interviews") {
+    try { slots = await db.listInterviewSlots(); } catch (err) { slots = err; }
+    if (t !== token) return;
+  }
   const body = which === "sessions" ? sessionsTab(upcoming, past, cycles, state, admin)
+    : which === "interviews" ? interviewsTab(slots, applications)
     : which === "notify" ? notifyTab(notify)
       : cyclesTab(cycles, applications, admin);
   screen(t, {
@@ -2451,6 +2542,126 @@ function sessionForm(s, cycles, state, close) {
       }, s ? s.id : null);
       await again();
       toast(s ? "Session updated." : "Session added. It's on the Students page now.");
+    });
+  });
+  return form;
+}
+
+// ---- interviews
+
+function interviewsTab(slots, applications) {
+  if (slots instanceof Error) {
+    return h("div", {}, h("p", { class: "p-lead" }, "Interview scheduling needs the latest database update. Run supabase/schema.sql again in the Supabase SQL Editor, then reload this page."), empty(slots.message));
+  }
+  const now = Date.now();
+  const upcoming = slots.filter((s) => new Date(s.ends_at) > now);
+  const booked = new Set(slots.flatMap((s) => s.bookings.map((b) => `${b.application_id}:${b.round}`)));
+  const waiting = applications.filter((a) => ["interview_1", "interview_2"].includes(a.status) && !booked.has(`${a.id}:${a.status}`));
+  const editor = formPanel("Add interview times", (_, close) => interviewForm(close));
+  const seats = upcoming.reduce((n, s) => n + s.capacity, 0);
+  const taken = upcoming.reduce((n, s) => n + s.bookings.length, 0);
+  return h("div", {},
+    h("p", { class: "p-lead" }, "Add a block of time and it's split into interview times. Applicants invited to that round choose one on their application page. They see only which times are open, never who booked the others. Every time is Chicago time."),
+    editor.panel,
+    sec({ title: "Still need a time", note: waiting.length ? `${waiting.length} invited` : null },
+      waiting.length ? h("div", {},
+        h("ul", { class: "p-waiting" }, waiting.map((a) => h("li", {}, h("a", { class: "p-strong", href: `#application-${a.id}` }, a.full_name || a.email), h("span", { class: "p-sub2" }, ROUND[a.status])))),
+        h("div", { class: "p-form-actions" }, h("button", { type: "button", class: "btn btn-quiet btn-small", onclick: () => copyList(waiting.map((a) => a.email).join(", "), "Emails") }, "Copy their emails")))
+        : empty("Everyone invited to an interview has a time.")),
+    sec({ title: "Upcoming times", note: upcoming.length ? `${taken} of ${seats} booked` : null,
+      action: upcoming.length ? h("button", { type: "button", class: "btn btn-quiet btn-small", onclick: () => downloadFile(`foreman-interviews-${todayISO()}.csv`, csv([["Date", "Time", "Interview", "Place", "Name", "Email"], ...upcoming.flatMap((s) => (s.bookings.length ? s.bookings : [{ name: "", email: "" }]).map((b) => [dayLong(s.starts_at), timeRange(s.starts_at, s.ends_at), ROUND[s.round], s.location || s.meeting_url, b.name, b.email]))])) }, "Download schedule") : null },
+      upcoming.length ? slotTable(upcoming) : empty("No interview times yet. Add a block above.")));
+}
+
+function slotTable(slots) {
+  const days = new Map();
+  for (const s of slots) {
+    const day = zonedParts(s.starts_at).day;
+    if (!days.has(day)) days.set(day, []);
+    days.get(day).push(s);
+  }
+  const bookedCell = (s) => {
+    if (!s.bookings.length) return h("span", { class: "p-sub2" }, s.capacity > 1 ? `Open, ${s.capacity} places` : "Open");
+    return h("ul", { class: "p-booked" }, s.bookings.map((b) => {
+      const remove = textBtn("Remove", (e) => confirmInline(e.currentTarget, { text: `Remove ${b.name || "this"} booking? They can choose a new time.`, yes: "Remove", danger: true }, async () => {
+        await db.deleteInterviewBooking(b.id);
+        await again();
+        toast("Booking removed. Let them know so they can choose a new time.");
+      }), "danger");
+      return h("li", {}, h("a", { href: `#application-${b.application_id}` }, b.name || b.email), remove);
+    }));
+  };
+  const deleteBtn = (s) => textBtn("Delete", (e) => confirmInline(e.currentTarget, {
+    text: s.bookings.length ? `Delete this time? ${s.bookings.map((b) => b.name).join(" and ")} will lose the booking, so tell them.` : "Delete this time?",
+    yes: "Delete", danger: true,
+  }, async () => {
+    await db.deleteInterviewSlot(s.id);
+    await again();
+    toast("Interview time deleted.");
+  }), "danger");
+  const row = (s) => h("tr", {},
+    h("td", { class: "p-td-date" }, timeRange(s.starts_at, s.ends_at)),
+    h("td", {}, ROUND[s.round]),
+    h("td", {}, s.location || (s.meeting_url ? "Online" : "—")),
+    h("td", {}, bookedCell(s)),
+    h("td", { class: "p-td-actions" }, deleteBtn(s)));
+  const table = (list) => h("div", { class: "p-table-wrap" }, h("table", { class: "p-table" },
+    h("thead", {}, h("tr", {}, ["Time", "Interview", "Place", "Booked", ""].map((c) => h("th", { scope: "col" }, c)))),
+    h("tbody", {}, list.map(row))));
+  return h("div", {}, [...days.values()].map((list) => h("div", { class: "p-slot-admin-day" }, h("h3", {}, dayLong(list[0].starts_at)), table(list))));
+}
+
+// A block of time, split into back-to-back interview times.
+function splitTimes(day, from, to, minutes) {
+  const out = [];
+  const end = new Date(zonedISO(day, to)).getTime();
+  let t = new Date(zonedISO(day, from)).getTime();
+  while (t + minutes * 6e4 <= end && out.length < 60) {
+    out.push({ starts_at: new Date(t).toISOString(), ends_at: new Date(t + minutes * 6e4).toISOString() });
+    t += minutes * 6e4;
+  }
+  return out;
+}
+
+function interviewForm(close) {
+  const msg = h("p", { class: "p-form-msg", role: "status", hidden: true });
+  const preview = h("p", { class: "p-hint wide-hint" });
+  const submit = h("button", { class: "btn btn-small", type: "submit" }, "Add times");
+  const form = h("form", { class: "form p-panel-form", novalidate: true },
+    field({ label: "Interview", name: "round", type: "select", required: true, value: "interview_1", options: [{ value: "interview_1", label: "First interview" }, { value: "interview_2", label: "Case interview" }] }),
+    field({ label: "Date", name: "day", type: "date", required: true }),
+    h("div", { class: "p-pair" },
+      field({ label: "From", name: "from", type: "time", required: true, value: "13:00" }),
+      field({ label: "To", name: "to", type: "time", required: true, value: "16:00" })),
+    h("div", { class: "p-pair" },
+      field({ label: "Each interview", name: "minutes", type: "select", required: true, value: "30", options: [15, 20, 30, 45, 60, 90].map((m) => ({ value: String(m), label: `${m} minutes` })) }),
+      field({ label: "Interviews at once", name: "capacity", type: "number", required: true, value: "1", hint: "More than 1 if several interviewers run in parallel." })),
+    field({ label: "Place", name: "location", optional: true, placeholder: "Harper Memorial Library, Room 130" }),
+    field({ label: "Video link", name: "meeting_url", type: "url", optional: true, hint: "Shared only with the person who books the time." }),
+    preview, msg,
+    h("div", { class: "p-form-actions wide" }, submit));
+  const round = form.elements.namedItem("round");
+  const minutes = form.elements.namedItem("minutes");
+  round.addEventListener("change", () => { minutes.value = round.value === "interview_2" ? "45" : "30"; update(); });
+  const update = () => {
+    const d = formData(form);
+    const times = d.day && d.from && d.to ? splitTimes(d.day, d.from, d.to, Number(d.minutes)) : [];
+    preview.textContent = times.length ? `This adds ${times.length} ${times.length === 1 ? "time" : "times"}: ${times.map((x) => timeOf(x.starts_at)).join(", ")}.` : d.day ? "Make the block at least one interview long." : "";
+  };
+  form.addEventListener("input", update);
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const d = formData(form);
+    const capacity = Math.max(1, Math.min(20, Number(d.capacity) || 1));
+    const times = d.day && d.from && d.to ? splitTimes(d.day, d.from, d.to, Number(d.minutes)) : [];
+    if (!d.day) return say(msg, "Choose a date.", "bad");
+    if (!times.length) return say(msg, "The block is shorter than one interview. Check the times.", "bad");
+    if (new Date(times[0].starts_at).getTime() < Date.now()) return say(msg, "That time has already passed.", "bad");
+    say(msg, "");
+    act(submit, "Adding…", async () => {
+      await db.createInterviewSlots(times.map((x) => ({ ...x, round: d.round, capacity, location: d.location || "", meeting_url: d.meeting_url || "" })));
+      await again();
+      toast(`${times.length} interview ${times.length === 1 ? "time" : "times"} added. Invited applicants can book now.`);
     });
   });
   return form;

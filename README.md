@@ -84,6 +84,7 @@ Everything here is managed in the portal and appears on the website straight awa
 - Open **Sign-ups** to see who is coming, copy their emails or download a CSV.
 - **Check-in at the session (administrators).** Open **Check-in QR** on a session to get its private check-in link as a QR code. Show it full screen in the room, or download it to print. People scan it, add their name and email on `checkin.html`, and appear under **Attendance**, marked as signed up beforehand or as a walk-in. The link works from two hours before the session until four hours after it ends, and only administrators can see it. If a photo of the code gets shared, **Make a new link** and the old code stops working.
 - **Attendance** is visible to everyone who helps run recruiting: who came, who signed up but didn't, and a CSV.
+- **Interview times (administrators).** In **Recruiting → Interviews**, add a block such as Monday 1 to 4 pm for first interviews. It is split into back-to-back times (30 minutes by default, 45 for case interviews), and you can allow several interviews at once if more than one interviewer is free. Applicants whose status is First interview or Case interview choose a time on their application page. They see only which times are open, never who took the others, and the video link is shown only to the person who books. They can change or cancel up to two hours before. The tab also lists everyone invited who still needs a time, with their emails, and the schedule downloads as a CSV.
 
 **Notify list** (Portal → Recruiting → Notify list). While applications are closed, the Students page asks visitors for their email. When a cycle opens, copy the addresses into the BCC line of one email, then clear the list.
 
@@ -105,6 +106,7 @@ The old Framer addresses `/for-business-owners`, `/team`, `/research` and `/join
 
 ## 6. Updating the site later
 
+- **Adding interview scheduling:** upload the changed files, then run the whole of `supabase/schema.sql` again in the Supabase SQL Editor. Until you do, the Interviews tab explains that the update is needed and applicants see their status as before.
 - **Adding info session check-in:** upload the changed files, then run the whole of `supabase/schema.sql` again in the Supabase SQL Editor. It adds the attendance table and the check-in functions and keeps all your data. Until you do, the portal works as before, without attendance.
 - **Updating from the November 4 version:** upload every file in this folder except `config.js`, then run the whole of `supabase/schema.sql` again in the Supabase SQL Editor. It adds recruiting cycles, info sessions, the notify list, the team page and the team photo bucket, and keeps all your data. Then schedule your first cycle under Portal → Recruiting, because applications stay closed until one is open.
 - Update packages leave out `config.js`, so your Supabase settings are never overwritten. Upload the changed files on GitHub and keep your existing `config.js`.
