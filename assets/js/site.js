@@ -254,6 +254,9 @@ function field(canvas) {
     canvas.height = Math.round(h * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   };
+  const css = getComputedStyle(host);
+  const dot = css.getPropertyValue("--field-dot").trim() || "rgba(10,20,40,0.12)";
+  const glow = css.getPropertyValue("--field-lens").trim() || "36,70,216";
   const draw = () => {
     ctx.clearRect(0, 0, w, h);
     const gap = 24, R = 170;
@@ -263,7 +266,7 @@ function field(canvas) {
         const k = dist < R ? (1 - dist / R) ** 2 * lens : 0;
         const ox = dist ? (dx / dist) * k * 9 : 0;
         const oy = dist ? (dy / dist) * k * 9 : 0;
-        ctx.fillStyle = k > 0.02 ? `rgba(36,70,216,${(0.16 + k * 0.5).toFixed(3)})` : "rgba(10,20,40,0.12)";
+        ctx.fillStyle = k > 0.02 ? `rgba(${glow},${(0.16 + k * 0.5).toFixed(3)})` : dot;
         ctx.beginPath();
         ctx.arc(x + ox, y + oy, 0.9 + k * 1.4, 0, Math.PI * 2);
         ctx.fill();

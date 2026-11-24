@@ -1,0 +1,170 @@
+/* Foreman theme, shared by every page. The home page loads it with home.css; the inner pages load it
+   after site.css, which still styles their components (forms, the recruiting calendar, the team cards).
+   Class names here start with ui- so they never collide with site.css. */
+
+@font-face {
+  font-family: "Geist";
+  src: url("../fonts/geist-latin-wght-normal.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --night: #060b16;
+  --navy: #0a1428;
+  --band: #0b1830;
+  --mist: #f3f5f8;
+  --on-dark: #eef1f6;
+  --on-dark-2: #a9b2c3;
+  --on-dark-3: #8d97ab;
+  --line-dark: rgba(255, 255, 255, 0.12);
+  --glow: #8ea2ff;            /* the one cool accent, used for interaction on dark grounds */
+  --ui-wrap: min(100% - 160px, 1280px);
+  --ui-nav-h: 80px;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+
+  /* site.css tokens, moved onto the new look: one modern sans for headings, navy for actions */
+  --serif: "Geist", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --sans: "Geist", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --signal: #0a1428;
+  --accent: #2446d8;
+  --header: 80px;
+}
+@media (max-width: 1023px) { :root { --ui-wrap: min(100% - 96px, 1280px); } }
+@media (max-width: 639px) { :root { --ui-wrap: calc(100% - 48px); --ui-nav-h: 64px; --header: 64px; } }
+
+/* Moving between pages: a short cross-fade (Chrome and Safari; others just navigate). */
+@view-transition { navigation: auto; }
+::view-transition-old(root) { animation: 160ms ease both ui-vt-out; }
+::view-transition-new(root) { animation: 260ms var(--ease-out) both ui-vt-in; }
+@keyframes ui-vt-out { to { opacity: 0; } }
+@keyframes ui-vt-in { from { opacity: 0; transform: translateY(8px); } }
+@media (prefers-reduced-motion: reduce) { ::view-transition-old(root), ::view-transition-new(root) { animation: none; } }
+
+.ui-wrap { width: var(--ui-wrap); margin-inline: auto; }
+.ui-skip { position: absolute; left: 16px; top: -100px; z-index: 60; padding: 10px 16px; background: #fff; color: var(--navy); font: 500 15px/1.2 "Geist", sans-serif; text-decoration: none; }
+.ui-skip:focus { top: 16px; }
+
+/* ---------- buttons and links ---------- */
+.ui-btn { display: inline-flex; align-items: center; justify-content: center; gap: 10px; height: 48px; padding: 0 24px; border: 1px solid transparent; border-radius: 0;
+  font: 500 15px/1 "Geist", sans-serif; letter-spacing: 0; text-decoration: none; white-space: nowrap; cursor: pointer; user-select: none; touch-action: manipulation;
+  transition: background-color 160ms ease, color 160ms ease, border-color 160ms ease, transform 120ms var(--ease-out); }
+.ui-btn:active { transform: scale(0.98); }
+.ui-btn--light { background: #fff; color: var(--night); }
+.ui-btn--navy { background: var(--navy); color: #fff; }
+.ui-btn--line { border-color: rgba(255, 255, 255, 0.55); color: #fff; height: 40px; padding: 0 18px; font-size: 14px; }
+.ui-btn svg { width: 14px; height: 14px; transition: transform 200ms var(--ease-out); }
+.ui-link { position: relative; display: inline-block; padding-bottom: 4px; font: 500 15px/1.4 "Geist", sans-serif; text-decoration: none; color: inherit;
+  background: linear-gradient(currentColor, currentColor) left bottom / 100% 1px no-repeat; transition: background-size 240ms var(--ease-out); touch-action: manipulation; }
+@media (hover: hover) and (pointer: fine) {
+  .ui-btn--light:hover { background: #dfe4ec; }
+  .ui-btn--navy:hover { background: #1b2a49; }
+  .ui-btn--line:hover { background: #fff; color: var(--night); border-color: #fff; }
+  .ui-btn:hover svg { transform: translateX(3px); }
+  .ui-link:hover { background-size: 0% 1px; background-position: right bottom; }
+}
+:where(.ui-nav, .ui-footer) :focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+
+/* ---------- nav: on the night ground over each page's dark opening, white once past it ---------- */
+.ui-nav { position: fixed; inset: 0 0 auto; z-index: 40; height: var(--ui-nav-h); color: var(--on-dark); font-family: "Geist", sans-serif;
+  background: rgba(6, 11, 22, 0); border-bottom: 1px solid var(--line-dark); transition: background-color 220ms ease, color 220ms ease, border-color 220ms ease; }
+.ui-nav.is-solid { background: rgba(255, 255, 255, 0.96); -webkit-backdrop-filter: saturate(1.4) blur(12px); backdrop-filter: saturate(1.4) blur(12px); color: var(--navy); border-bottom-color: #e2e6ee; }
+.ui-nav > .ui-wrap { height: 100%; display: flex; align-items: center; justify-content: space-between; gap: 32px; }
+.ui-nav__logo { display: block; color: inherit; }
+.ui-nav__logo svg { display: block; height: 20px; width: auto; }
+.ui-nav__menu { display: flex; align-items: center; gap: 36px; }
+.ui-nav__links { display: flex; gap: 32px; font-size: 14px; }
+.ui-nav__links a, .ui-nav__signin { position: relative; color: inherit; text-decoration: none; opacity: 0.82; transition: opacity 150ms ease; }
+.ui-nav__links a::after { content: ""; position: absolute; left: 0; right: 0; bottom: -8px; height: 1px; background: currentColor; transform: scaleX(0); transform-origin: left; transition: transform 240ms var(--ease-out); }
+.ui-nav__links a[aria-current="page"] { opacity: 1; }
+.ui-nav__links a[aria-current="page"]::after { transform: none; }
+@media (hover: hover) and (pointer: fine) {
+  .ui-nav__links a:hover, .ui-nav__signin:hover { opacity: 1; }
+  .ui-nav__links a:hover::after { transform: none; }
+}
+.ui-nav__signin { font-size: 14px; }
+.ui-nav.is-solid .ui-btn--line { border-color: var(--navy); background: var(--navy); color: #fff; }
+.ui-nav__toggle { display: none; width: 44px; height: 44px; margin-right: -10px; border: 0; background: none; color: inherit; cursor: pointer; touch-action: manipulation; }
+.ui-nav__toggle svg { display: block; margin: auto; }
+.ui-nav__toggle path { transition: transform 240ms var(--ease-out); transform-origin: 10px 10px; }
+.ui-nav.is-open .ui-nav__toggle path:first-child { transform: translateY(4px) rotate(45deg); }
+.ui-nav.is-open .ui-nav__toggle path:last-child { transform: translateY(-4px) rotate(-45deg); }
+@media (max-width: 1023px) {
+  .ui-nav__toggle { display: block; }
+  .ui-nav__menu { position: fixed; inset: var(--ui-nav-h) 0 0; display: flex; flex-direction: column; align-items: stretch; gap: 0;
+    padding: 16px 24px calc(32px + env(safe-area-inset-bottom)); background: var(--night); color: var(--on-dark); overflow-y: auto;
+    opacity: 0; visibility: hidden; transform: translateY(-8px); transition: opacity 200ms ease, transform 240ms var(--ease-out), visibility 0s linear 240ms; }
+  .ui-nav.is-open .ui-nav__menu { opacity: 1; visibility: visible; transform: none; transition: opacity 200ms ease, transform 240ms var(--ease-out), visibility 0s; }
+  .ui-nav.is-open { background: var(--night); color: var(--on-dark); border-bottom-color: var(--line-dark); -webkit-backdrop-filter: none; backdrop-filter: none; }
+  .ui-nav__links { flex-direction: column; gap: 0; font-size: 24px; letter-spacing: -0.02em; }
+  .ui-nav__links a, .ui-nav__signin { display: flex; align-items: center; min-height: 62px; border-bottom: 1px solid var(--line-dark); opacity: 1; font-size: 24px; letter-spacing: -0.02em; }
+  .ui-nav__links a::after { display: none; }
+  .ui-nav__menu .ui-btn { margin-top: 32px; height: 54px; font-size: 16px; border-color: #fff; background: #fff; color: var(--night); }
+}
+
+/* ---------- footer, on the night ground ---------- */
+.ui-footer { background: var(--night); color: var(--on-dark); font-family: "Geist", sans-serif; padding-top: clamp(88px, 10vw, 160px); padding-bottom: calc(40px + env(safe-area-inset-bottom)); }
+.ui-close { display: flex; justify-content: space-between; align-items: end; gap: 48px; flex-wrap: wrap; padding-bottom: clamp(64px, 7vw, 96px); border-bottom: 1px solid var(--line-dark); }
+.ui-close h2 { margin: 0; font-size: clamp(34px, 3.9vw, 56px); font-weight: 400; line-height: 1.04; letter-spacing: -0.04em; max-width: 14ch; color: #fff; }
+.ui-close p { margin: 20px 0 0; color: var(--on-dark-2); max-width: 36em; font-size: 16px; line-height: 1.6; }
+.ui-footer__grid { padding-top: 64px; display: grid; grid-template-columns: 4fr repeat(4, 2fr); gap: 32px; }
+.ui-footer__brand svg { height: 26px; width: auto; display: block; color: #fff; }
+.ui-footer__brand p { margin: 20px 0 0; font-size: 14px; line-height: 1.6; color: var(--on-dark-3); max-width: 24em; }
+.ui-footer h3 { margin: 0 0 16px; font-family: "Geist", sans-serif; font-size: 13px; font-weight: 500; letter-spacing: 0; color: var(--on-dark-3); }
+.ui-footer ul { margin: 0; padding: 0; list-style: none; }
+.ui-footer li a { display: inline-block; padding: 6px 0; font-size: 14px; text-decoration: none; color: var(--on-dark); opacity: 0.86; }
+@media (hover: hover) and (pointer: fine) { .ui-footer li a:hover { opacity: 1; text-decoration: underline; text-underline-offset: 4px; } }
+.ui-footer__legal { margin-top: 64px; display: flex; justify-content: space-between; gap: 24px; flex-wrap: wrap; font-size: 13px; line-height: 1.6; color: var(--on-dark-3); }
+.ui-footer__legal a { color: inherit; }
+@media (max-width: 1023px) { .ui-footer__grid { grid-template-columns: 1fr 1fr; row-gap: 40px; } .ui-footer__brand { grid-column: 1 / -1; } }
+@media (max-width: 639px) { .ui-close .ui-btn { width: 100%; } .ui-footer li a { padding: 10px 0; } }
+
+/* ---------- inner pages: site.css components on the new look ---------- */
+body:not(.home) { font-family: "Geist", "Helvetica Neue", Helvetica, Arial, sans-serif; }
+body:not(.home) main { padding-top: 0; }
+/* Every page opens on the night ground, like the home page. */
+.page-hero { background: var(--night); color: var(--on-dark); border-bottom: 0; padding-top: calc(var(--ui-nav-h) + clamp(64px, 9vw, 136px)); padding-bottom: clamp(64px, 8vw, 120px);
+  --field-dot: rgba(255, 255, 255, 0.10); --field-lens: 142, 162, 255; }
+.page-hero h1 { color: #fff; letter-spacing: -0.045em; line-height: 0.98; font-size: clamp(44px, 6.4vw, 92px); }
+.page-hero .lede { color: var(--on-dark-2); }
+.page-hero .page-index { border-top-color: var(--line-dark); }
+.page-hero .page-index a { color: var(--on-dark); border-bottom-color: var(--line-dark); }
+@media (hover: hover) and (pointer: fine) { .page-hero .page-index a:hover { color: #fff; } }
+.page-hero .btn { background: #fff; color: var(--night); border-color: #fff; }
+.page-hero .btn-quiet { background: transparent; color: #fff; border-color: rgba(255, 255, 255, 0.5); }
+/* Headings everywhere: the modern sans, tighter. */
+.display, .closing h2 { letter-spacing: -0.04em; }
+.h3, .outcome h3, .seq-step h3, .points h3, .fit-title, .practice-strip strong { letter-spacing: -0.02em; }
+/* Buttons in site.css become square navy, like the home page. */
+.btn { border-radius: 0; }
+.btn:not(.btn-quiet) { background: var(--navy); border-color: var(--navy); color: #fff; }
+/* Pages without a dark opening (thanks, check-in, credits): clear the fixed nav. */
+body:not(.home) main > :first-child:not(.page-hero) { margin-top: var(--ui-nav-h); }
+/* Inside the dark openings, site.css components read the light-on-dark tokens. */
+.page-hero { --ink: #ffffff; --ink-2: var(--on-dark-2); --ink-3: var(--on-dark-3); --line: var(--line-dark); --line-2: rgba(255, 255, 255, 0.3); --bg: var(--night); --bg-soft: rgba(255, 255, 255, 0.04); --tint: rgba(255, 255, 255, 0.06); }
+.page-hero .btn:not(.btn-quiet) { background: #fff; color: var(--night); border-color: #fff; }
+.page-hero .link { color: #fff; }
+
+/* About: one team runs the whole cycle. Pointing at a stage lights it and the roles that lead it. */
+.unit { display: block; width: 100%; max-width: 520px; height: auto; overflow: visible; }
+.unit text { font: 500 12px "Geist", sans-serif; fill: var(--ink-3); }
+.unit .u-title { font-size: 13px; fill: var(--ink-2); }
+.unit .u-box { fill: var(--bg-soft, #f3f5f8); stroke: var(--line-2, #c9d0dc); }
+.unit .u-tie { fill: none; stroke: var(--line-2, #c9d0dc); stroke-width: 1.25; }
+.unit .u-cycle { fill: none; stroke: var(--line-2, #c9d0dc); stroke-width: 1.25; stroke-dasharray: 3 4; }
+.unit .u-head { fill: var(--line-2, #c9d0dc); }
+.unit .u-role circle { fill: #fff; stroke: var(--ink); stroke-width: 1.25; transition: fill 240ms ease, transform 240ms var(--ease-out); transform-box: fill-box; transform-origin: center; }
+.unit .u-role[data-role="em"] circle { fill: var(--navy); }
+.unit .u-chip rect { fill: #fff; stroke: var(--line-2, #c9d0dc); transition: fill 240ms ease, stroke 240ms ease; }
+.unit .u-chip text { font-size: 13px; fill: var(--ink); transition: fill 240ms ease; }
+.unit[data-active] .u-role:not(.is-lead) circle { opacity: 0.35; }
+.unit .u-role.is-lead circle { fill: #2446d8; stroke: #2446d8; transform: scale(1.15); }
+.unit .u-role.is-lead text { fill: var(--ink); }
+.unit .u-chip.is-on rect { fill: var(--navy); stroke: var(--navy); }
+.unit .u-chip.is-on text { fill: #fff; }
+.unit-list li { cursor: default; transition: background-color 200ms ease; outline: none; }
+.unit-list li.is-on h3 { color: #2446d8; }
+.unit-list li:focus-visible { box-shadow: inset 2px 0 0 #2446d8; }
+@media (prefers-reduced-motion: reduce) { .unit .u-role circle, .unit .u-chip rect, .unit .u-chip text { transition: none; } }
